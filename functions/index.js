@@ -30,7 +30,8 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 			"dateEdited": dateEdited,
 			"name": name,
 			"lesson": lessonKey,
-			"isFeatured": isFeatured
+			"isFeatured": isFeatured,
+			"subtopic": event.params.subtopicId
 		}
 
 		const headerPath = event.params.languageCode + "/subtopic_lesson_headers/" + topicId + "/" + event.params.subtopicId + "/" + lessonKey;
