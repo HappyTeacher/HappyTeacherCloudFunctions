@@ -46,27 +46,34 @@ exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subt
 		const lessonHeader = event.data.val();
 		const headerKey = event.data.key;
 
-		if (lessonHeader["isFeatured"]) {
-			const featuredHeaderPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId;
-			const featuredHeaderRef = admin.database().ref(featuredHeaderPath);
-			return featuredHeaderRef.set(lessonHeader);
-		} else {
-			return null;
-		}
-    });
-
-exports.countSubtopicSubmissions = functions.database.ref('{languageCode}/subtopic_lesson_headers/{topicId}/{subtopicId}/{lessonKey}')
-    .onWrite(event => {
-		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + topicId + "/" + event.params.subtopicId;
+		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId;
 		const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
 
 		return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
 			const submissionCount = dataSnapshot.numChildren();
+			lessonHeader["subtopicSubmissionCount"] = submissionCount;
 			
-			const subtopicSubmissionPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/subtopicSubmissionCount";
-			const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
+			if (lessonHeader["isFeatured"]) {
+				const featuredHeaderPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId;
+				const featuredHeaderRef = admin.database().ref(featuredHeaderPath);
+				return featuredHeaderRef.set(lessonHeader);
+			} else {
+				const featuredHeaderSubtopicPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId;
+				const featuredHeaderSubtopicRef = admin.database().ref(featuredHeaderSubtopicPath);
 
-			return subtopicSubmissionRef.set(submissionCount);
+				return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
+					const submissionCount = dataSnapshot.numChildren();
+
+					if (dataSnapshot.hasChildren()) {
+						// ==> this featured header has items in it ==> it exists!
+						const subtopicSubmissionRef = featuredHeaderSubtopicRef.child("subtopicSubmissionCount");
+						return subtopicSubmissionRef.set(submissionCount);
+					} else {
+						// There is no featured header to update.
+						return null;
+					}
+				});
+			}
 		});
     });
 
