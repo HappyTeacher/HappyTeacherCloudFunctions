@@ -55,6 +55,21 @@ exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subt
 		}
     });
 
+exports.countSubtopicSubmissions = functions.database.ref('{languageCode}/subtopic_lesson_headers/{topicId}/{subtopicId}/{lessonKey}')
+    .onWrite(event => {
+		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.subtopicId;
+		const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
+
+		return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
+			const submissionCount = dataSnapshot.numChildren();
+			
+			const subtopicSubmissionPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/subtopicSubmissionCount";
+			const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
+
+			return subtopicSubmissionRef.set(submissionCount);
+		});
+    });
+
 exports.countFeaturedSubtopicsForTopic = functions.database.ref('{languageCode}/featured_subtopic_lesson_headers/{topicId}/{subtopicId}/')
 	.onWrite(event => {
 		const parentPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId;
