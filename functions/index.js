@@ -61,11 +61,10 @@ exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subt
 				const featuredHeaderSubtopicPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId;
 				const featuredHeaderSubtopicRef = admin.database().ref(featuredHeaderSubtopicPath);
 
-				return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
-					const submissionCount = dataSnapshot.numChildren();
-
+				return featuredHeaderSubtopicRef.once('value').then(function(dataSnapshot) {
 					if (dataSnapshot.hasChildren()) {
 						// ==> this featured header has items in it ==> it exists!
+						const submissionCount = dataSnapshot.numChildren();
 						const subtopicSubmissionRef = featuredHeaderSubtopicRef.child("subtopicSubmissionCount");
 						return subtopicSubmissionRef.set(submissionCount);
 					} else {
