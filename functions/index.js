@@ -39,7 +39,7 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 			"lesson": lessonKey,
 			"isFeatured": isFeatured,
 			"subtopic": event.params.subtopicId,
-			"topic": event.params.subtopicId
+			"topic": event.params.topicId
 		}
 
 		return headerRef.set(lessonHeader);
