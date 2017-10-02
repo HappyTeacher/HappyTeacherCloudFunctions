@@ -2,7 +2,7 @@ const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 admin.initializeApp(functions.config().firebase);
 
-exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lessons/{subtopicId}/{lessonId}')
+exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{lessonId}')
     .onWrite(event => {
 		// Grab the current value of what was written to the Realtime Database.
 		const lesson = event.data.val();
@@ -18,9 +18,8 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 		console.log('Creating lesson header for subtopic', name, "from email ID", authorEmail);
 
 		const isFeatured = lesson["isFeatured"];
-		const topicId = lesson["topic"];
 
-		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.subtopicId;
+		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId;
 		const submissionRef = admin.database().ref(subtopicSubmissionPath)
 
 		const lessonHeader = {
@@ -32,10 +31,11 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 			"name": name,
 			"lesson": lessonKey,
 			"isFeatured": isFeatured,
-			"subtopic": event.params.subtopicId
+			"subtopic": event.params.subtopicId,
+			"topic": event.params.subtopicId
 		}
 
-		const headerPath = event.params.languageCode + "/subtopic_lesson_headers/" + topicId + "/" + event.params.subtopicId + "/" + lessonKey;
+		const headerPath = event.params.languageCode + "/subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/" + lessonKey;
 		const headerRef = admin.database().ref(headerPath);
 		return headerRef.set(lessonHeader);
     });
@@ -57,7 +57,7 @@ exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subt
 
 exports.countSubtopicSubmissions = functions.database.ref('{languageCode}/subtopic_lesson_headers/{topicId}/{subtopicId}/{lessonKey}')
     .onWrite(event => {
-		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.subtopicId;
+		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + topicId + "/" + event.params.subtopicId;
 		const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
 
 		return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
