@@ -1,6 +1,4 @@
 const functions = require('firebase-functions');
-
-// The Firebase Admin SDK to access the Firebase Realtime Database. 
 const admin = require('firebase-admin');
 admin.initializeApp(functions.config().firebase);
 
@@ -21,6 +19,9 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 
 		const isFeatured = lesson["isFeatured"];
 		const topicId = lesson["topic"];
+
+		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.subtopicId;
+		const submissionRef = admin.database().ref(subtopicSubmissionPath)
 
 		const lessonHeader = {
 			"authorEmail": authorEmail,
@@ -53,3 +54,18 @@ exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subt
 			return null;
 		}
     });
+
+exports.countFeaturedSubtopicsForTopic = functions.database.ref('{languageCode}/featured_subtopic_lesson_headers/{topicId}/{subtopicId}/')
+	.onWrite(event => {
+		const parentPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId;
+		const parentRef = admin.database().ref(parentPath);
+
+		return parentRef.once('value').then(function(dataSnapshot) {
+    		const subtopicCount = dataSnapshot.numChildren()
+    		const subtopicCountPath = event.params.languageCode + "/topics/" + event.params.topicId + "/featuredSubtopicCount";
+			const subtopicCountRef = admin.database().ref(subtopicCountPath);
+
+			return subtopicCountRef.set(subtopicCount);
+		});
+	});
+
