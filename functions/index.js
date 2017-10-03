@@ -1,5 +1,6 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
+const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
 exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{lessonId}')
@@ -97,4 +98,26 @@ exports.countFeaturedSubtopicsForTopic = functions.database.ref('{languageCode}/
 			return subtopicCountRef.set(subtopicCount);
 		});
 	});
+
+exports.addAttachmentMetadataToCard = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{submissionId}/cards/{cardId}/attachmentPath/')
+	.onWrite(event => {
+		const bucket = functions.config().firebase.storageBucket;
+		const path = event.data.val();
+		const file = gcs.bucket(bucket).file(path);
+
+		return file.getMetadata().then(function(data) {
+			const metadataPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.submissionId + "/cards/" + event.params.cardId + "/attachmentMetadata";
+			const metadataRef = admin.database().ref(metadataPath);
+
+			metadataObject = {
+				"contentType": data[0]["contentType"],
+				"size": Number(data[0]["size"]),
+				"timeCreated": Date.parse(data[0]["timeCreated"])
+			}
+		  	
+		  	return metadataRef.set(metadataObject);
+		});
+
+	});
+
 

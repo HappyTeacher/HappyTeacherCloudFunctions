@@ -3,3 +3,4 @@ firebase.json
 functions/node_modules
 .firebaserc
 functions/package.json
+node_modules/
