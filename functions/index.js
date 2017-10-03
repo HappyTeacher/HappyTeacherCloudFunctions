@@ -21,7 +21,7 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 		const authorName = lesson["authorName"];
 		const dateEdited = lesson["dateEdited"];
 		const name = lesson["name"];
-		const subject = lesson["subject"];
+		const subjectName = lesson["subjectName"];
 
 		console.log('Creating lesson header for subtopic', name, "from email ID", authorEmail);
 
@@ -41,7 +41,7 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 			"isFeatured": isFeatured,
 			"subtopic": event.params.subtopicId,
 			"topic": event.params.topicId,
-			"subject": subject
+			"subjectName": subjectName
 		}
 
 		return headerRef.set(lessonHeader);
