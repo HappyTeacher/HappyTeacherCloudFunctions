@@ -120,6 +120,10 @@ exports.addAttachmentMetadataToCard = functions.database.ref('{languageCode}/sub
 
 exports.countTopicsForSyllabusLesson = functions.database.ref('{languageCode}/syllabus_lessons/{boardId}/{subjectId}/{level}/{syllabusLessonId}/topics')
 	.onWrite(event => {
+		if (!event.data.exists()) {
+			return null;
+		}
+
 		const topicCount = event.data.numChildren();
 		const syllabusLessonTopicCountRef = event.data.adminRef.parent.child("topicCount");
 
