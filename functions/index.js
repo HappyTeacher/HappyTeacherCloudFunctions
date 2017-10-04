@@ -24,8 +24,6 @@ exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson
 		const name = lesson["name"];
 		const subjectName = lesson["subjectName"];
 
-		console.log('Creating lesson header for subtopic', name, "from email ID", authorEmail);
-
 		const isFeatured = lesson["isFeatured"];
 
 		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId;
@@ -118,6 +116,14 @@ exports.addAttachmentMetadataToCard = functions.database.ref('{languageCode}/sub
 		  	return metadataRef.set(metadataObject);
 		});
 
+	});
+
+exports.countTopicsForSyllabusLesson = functions.database.ref('{languageCode}/syllabus_lessons/{boardId}/{subjectId}/{level}/{syllabusLessonId}/topics')
+	.onWrite(event => {
+		const topicCount = event.data.numChildren();
+		const syllabusLessonTopicCountRef = event.data.adminRef.parent.child("topicCount");
+
+		return syllabusLessonTopicCountRef.set(topicCount);
 	});
 
 
