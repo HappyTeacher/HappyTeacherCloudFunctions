@@ -5,45 +5,18 @@ admin.initializeApp(functions.config().firebase);
 
 exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{lessonId}')
     .onWrite(event => {
-		// Grab the current value of what was written to the Realtime Database.
-		const lesson = event.data.val();
-		const lessonKey = event.data.key;
-
 		const headerPath = event.params.languageCode + "/subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.lessonId;
 		const headerRef = admin.database().ref(headerPath);
 
-		if (!lesson) {
-			return headerRef.remove();
-		}
-		
-		const authorEmail = lesson["authorEmail"];
-		const authorInstitution = lesson["authorInstitution"];
-		const authorLocation = lesson["authorLocation"];
-		const authorName = lesson["authorName"];
-		const dateEdited = lesson["dateEdited"];
-		const name = lesson["name"];
-		const subjectName = lesson["subjectName"];
+		return writeHeaderToRefFromEvent(event, headerRef);
+    });
 
-		const isFeatured = lesson["isFeatured"];
+exports.addClassroomResourcesHeader = functions.database.ref('{languageCode}/classroom_resources/{topicId}/{subtopicId}/{lessonId}')
+    .onWrite(event => {
+		const headerPath = event.params.languageCode + "/classroom_resources_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.lessonId;
+		const headerRef = admin.database().ref(headerPath);
 
-		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId;
-		const submissionRef = admin.database().ref(subtopicSubmissionPath)
-
-		const lessonHeader = {
-			"authorEmail": authorEmail,
-			"authorInstitution": authorInstitution,
-			"authorLocation": authorLocation,
-			"authorName": authorName,
-			"dateEdited": dateEdited,
-			"name": name,
-			"lesson": lessonKey,
-			"isFeatured": isFeatured,
-			"subtopic": event.params.subtopicId,
-			"topic": event.params.topicId,
-			"subjectName": subjectName
-		}
-
-		return headerRef.set(lessonHeader);
+		return writeHeaderToRefFromEvent(event, headerRef);
     });
 
 exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson_headers/{topicId}/{subtopicId}/{lessonKey}')
@@ -129,5 +102,53 @@ exports.countTopicsForSyllabusLesson = functions.database.ref('{languageCode}/sy
 
 		return syllabusLessonTopicCountRef.set(topicCount);
 	});
+
+function getCardListHeaderObjectFromEvent(event) {
+	// Grab the current value of what was written to the Realtime Database.
+	const cardListContent = event.data.val();
+	const cardListKey = event.data.key;
+
+	if (!cardListContent) {
+		return null;
+	}
+	
+	const authorEmail = cardListContent["authorEmail"];
+	const authorInstitution = cardListContent["authorInstitution"];
+	const authorLocation = cardListContent["authorLocation"];
+	const authorName = cardListContent["authorName"];
+	const dateEdited = cardListContent["dateEdited"];
+	const name = cardListContent["name"];
+	const subjectName = cardListContent["subjectName"];
+	const isFeatured = cardListContent["isFeatured"];
+
+	const header = {
+		"authorEmail": authorEmail,
+		"authorInstitution": authorInstitution,
+		"authorLocation": authorLocation,
+		"authorName": authorName,
+		"dateEdited": dateEdited,
+		"name": name,
+		"contentKey": cardListKey,
+		"subtopic": event.params.subtopicId,
+		"topic": event.params.topicId,
+		"subjectName": subjectName
+	}
+
+	if (isFeatured != null) {
+		header["isFeatured"] = isFeatured;
+	}
+
+	return header;
+}
+
+function writeHeaderToRefFromEvent(event, ref) {
+	const headerObject = getCardListHeaderObjectFromEvent(event)
+
+	if (!headerObject) {
+		return ref.remove();
+	}
+
+	return ref.set(headerObject);
+}
 
 
