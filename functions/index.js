@@ -3,152 +3,124 @@ const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
-exports.addLessonHeader = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{lessonId}')
-    .onWrite(event => {
-		const headerPath = event.params.languageCode + "/subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.lessonId;
-		const headerRef = admin.database().ref(headerPath);
-
-		return writeHeaderToRefFromEvent(event, headerRef);
-    });
-
-exports.addClassroomResourcesHeader = functions.database.ref('{languageCode}/classroom_resources/{topicId}/{subtopicId}/{lessonId}')
-    .onWrite(event => {
-		const headerPath = event.params.languageCode + "/classroom_resources_headers/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.lessonId;
-		const headerRef = admin.database().ref(headerPath);
-
-		return writeHeaderToRefFromEvent(event, headerRef);
-    });
-
-exports.updateFeaturedLessonHeader = functions.database.ref('{languageCode}/subtopic_lesson_headers/{topicId}/{subtopicId}/{lessonKey}')
-    .onWrite(event => {
-		// Grab the current value of what was written to the Realtime Database.
-		const lessonHeader = event.data.val();
-		const headerKey = event.data.key;
-
-		const featuredHeaderPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId + "/" + event.params.subtopicId;
-		const featuredHeaderRef = admin.database().ref(featuredHeaderPath);
-
-		if (!lessonHeader) {
-			return featuredHeaderRef.remove();
-		}
-
-		const subtopicSubmissionPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId;
-		const subtopicSubmissionRef = admin.database().ref(subtopicSubmissionPath);
-
-		return subtopicSubmissionRef.once('value').then(function(dataSnapshot) {
-			const submissionCount = dataSnapshot.numChildren();
-			lessonHeader["subtopicSubmissionCount"] = submissionCount;
-			
-			if (lessonHeader["isFeatured"]) {
-				return featuredHeaderRef.set(lessonHeader);
-			} else {
-				return featuredHeaderRef.once('value').then(function(dataSnapshot) {
-					if (dataSnapshot.hasChildren()) {
-						// ==> this featured header has items in it ==> it exists!
-						const subtopicSubmissionRef = featuredHeaderRef.child("subtopicSubmissionCount");
-						return subtopicSubmissionRef.set(submissionCount);
-					} else {
-						// There is no featured header to update.
-						return null;
-					}
-				});
-			}
-		});
-    });
-
-exports.countFeaturedSubtopicsForTopic = functions.database.ref('{languageCode}/featured_subtopic_lesson_headers/{topicId}/{subtopicId}/')
+exports.countSubtopicSubmissions = functions.firestore.document('localized/{languageCode}/lessons/{lessonId}')
 	.onWrite(event => {
-		const parentPath = event.params.languageCode + "/featured_subtopic_lesson_headers/" + event.params.topicId;
-		const parentRef = admin.database().ref(parentPath);
+        let subtopic = null;
 
-		return parentRef.once('value').then(function(dataSnapshot) {
-    		const subtopicCount = dataSnapshot.numChildren()
-    		const subtopicCountPath = event.params.languageCode + "/topics/" + event.params.topicId + "/featuredSubtopicCount";
-			const subtopicCountRef = admin.database().ref(subtopicCountPath);
+        // Begin by setting subtopic to be the old subtopic, if possible:
+	    if (event.data.previous && event.data.previous.data()["subtopic"]) {
+	        subtopic = event.data.previous.data()["subtopic"]
+        }
 
-			return subtopicCountRef.set(subtopicCount);
-		});
+        // If there's a new subtopic (and the data hasn't been deleted), use that:
+        if (event.data.exists && event.data.data()["subtopic"]) {
+            subtopic = event.data.data()["subtopic"];
+        }
+
+        // If neither the old nor new data has a subtopic, return null.
+        if (!subtopic) {
+	        return null;
+        }
+
+	    const lessonCollectionRef = event.data.ref.parent;
+        const lessonsForSubtopicQuery = lessonCollectionRef.where("subtopic", "==", subtopic);
+
+        return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
+            const count = querySnapshot.size;
+
+            const featuredLessonsForSubtopicQuery = lessonsForSubtopicQuery.where("isFeatured", "==", true);
+
+            const writePromises = [];
+            featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
+                querySnapshot.forEach(function(doc) {
+                    let writePromise = doc.ref.update({subtopicSubmissionCount : count});
+                    writePromises.push(writePromise);
+                });
+
+                // Write count to all featured lessons (there should only be one)
+                return Promise.all(writePromises);
+            });
+        });
 	});
 
-exports.addAttachmentMetadataToCard = functions.database.ref('{languageCode}/subtopic_lessons/{topicId}/{subtopicId}/{submissionId}/cards/{cardId}/attachmentPath/')
-	.onWrite(event => {
+exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{languageCode}/{contentCollectionId}/{lessonId}/cards/{cardId}')
+	.onUpdate(event => {
+	    const contentCollectionId = event.params.contentCollectionId;
+
+	    // Only proceed if the content collection is `lessons` or `classroom_resources`
+	    if (contentCollectionId !== "lessons" && contentCollectionId !== "classroom_resources") {
+	        return null;
+        }
+
+	    const attachmentPath = event.data.data().attachmentPath;
+
+	    if (!attachmentPath) {
+	        return null;
+        }
+
 		const bucket = functions.config().firebase.storageBucket;
-		const path = event.data.val();
-		const file = gcs.bucket(bucket).file(path);
+		const file = gcs.bucket(bucket).file(attachmentPath);
 
 		return file.getMetadata().then(function(data) {
-			const metadataPath = event.params.languageCode + "/subtopic_lessons/" + event.params.topicId + "/" + event.params.subtopicId + "/" + event.params.submissionId + "/cards/" + event.params.cardId + "/attachmentMetadata";
-			const metadataRef = admin.database().ref(metadataPath);
 
 			metadataObject = {
 				"contentType": data[0]["contentType"],
 				"size": Number(data[0]["size"]),
 				"timeCreated": Date.parse(data[0]["timeCreated"])
-			}
-		  	
-		  	return metadataRef.set(metadataObject);
+			};
+
+            return event.data.ref.update({
+                attachmentMetadata: metadataObject
+            });
 		});
-
 	});
 
-exports.countTopicsForSyllabusLesson = functions.database.ref('{languageCode}/syllabus_lessons/{boardId}/{subjectId}/{level}/{syllabusLessonId}/topics')
-	.onWrite(event => {
-		if (!event.data.exists()) {
-			return null;
-		}
+function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
+    const lessonRef = firestoreRef.collection(`localized/${languageCode}/syllabus_lessons`).doc(lessonId);
 
-		const topicCount = event.data.numChildren();
-		const syllabusLessonTopicCountRef = event.data.adminRef.parent.child("topicCount");
+    const topicsForLessonQuery = firestoreRef.collection(`localized/${languageCode}/topics`)
+        .where(`syllabus_lessons.${lessonId}`, "==", true);
 
-		return syllabusLessonTopicCountRef.set(topicCount);
-	});
-
-function getCardListHeaderObjectFromEvent(event) {
-	// Grab the current value of what was written to the Realtime Database.
-	const cardListContent = event.data.val();
-	const cardListKey = event.data.key;
-
-	if (!cardListContent) {
-		return null;
-	}
-	
-	const authorEmail = cardListContent["authorEmail"];
-	const authorInstitution = cardListContent["authorInstitution"];
-	const authorLocation = cardListContent["authorLocation"];
-	const authorName = cardListContent["authorName"];
-	const dateEdited = cardListContent["dateEdited"];
-	const name = cardListContent["name"];
-	const subjectName = cardListContent["subjectName"];
-	const isFeatured = cardListContent["isFeatured"];
-
-	const header = {
-		"authorEmail": authorEmail,
-		"authorInstitution": authorInstitution,
-		"authorLocation": authorLocation,
-		"authorName": authorName,
-		"dateEdited": dateEdited,
-		"name": name,
-		"contentKey": cardListKey,
-		"subtopic": event.params.subtopicId,
-		"topic": event.params.topicId,
-		"subjectName": subjectName
-	}
-
-	if (isFeatured != null) {
-		header["isFeatured"] = isFeatured;
-	}
-
-	return header;
+    return topicsForLessonQuery.get().then(function(querySnapshot) {
+        let count = querySnapshot.size;
+        return lessonRef.update({topicCount: count})
+    });
 }
 
-function writeHeaderToRefFromEvent(event, ref) {
-	const headerObject = getCardListHeaderObjectFromEvent(event)
+exports.countTopicsForSyllabusLesson = functions.firestore.document('localized/{languageCode}/syllabus_lessons/{lessonId}')
+    .onUpdate(event => {
+        const lessonId = event.params.lessonId;
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
 
-	if (!headerObject) {
-		return ref.remove();
-	}
+        return updateSyllabusLessonCount(lessonId, firestoreRef, languageCode);
+    });
 
-	return ref.set(headerObject);
-}
+exports.countTopicsForSyllabusLessonOnTopicChange = functions.firestore.document('localized/{languageCode}/topics/{topicId}')
+    .onWrite(event => {
+        let oldSyllabusLessons = {};
+        let newSyllabusLessons = {};
 
+        if (event.data.previous && event.data.previous.data()["syllabus_lessons"]) {
+            oldSyllabusLessons = event.data.previous.data()["syllabus_lessons"];
+        }
 
+        if (event.data.exists && event.data.data()["syllabus_lessons"]) {
+            newSyllabusLessons = event.data.data()["syllabus_lessons"];
+        }
+
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
+
+        const writePromises = [];
+
+        for (oldLessonId in oldSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(oldLessonId, firestoreRef, languageCode))
+        }
+
+        for (newLessonId in newSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(newLessonId, firestoreRef, languageCode))
+        }
+
+        return Promise.all(writePromises);
+    });
