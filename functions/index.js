@@ -5,7 +5,7 @@ admin.initializeApp(functions.config().firebase);
 
 exports.countSubtopicSubmissions = functions.firestore.document('localized/{languageCode}/lessons/{lessonId}')
 	.onWrite(event => {
-        var subtopic = null;
+        let subtopic = null;
 
         // Begin by setting subtopic to be the old subtopic, if possible:
 	    if (event.data.previous && event.data.previous.data()["subtopic"]) {
@@ -33,7 +33,7 @@ exports.countSubtopicSubmissions = functions.firestore.document('localized/{lang
             const writePromises = [];
             featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
                 querySnapshot.forEach(function(doc) {
-                    var writePromise = doc.ref.update({subtopicSubmissionCount : count});
+                    let writePromise = doc.ref.update({subtopicSubmissionCount : count});
                     writePromises.push(writePromise);
                 });
 
@@ -44,7 +44,7 @@ exports.countSubtopicSubmissions = functions.firestore.document('localized/{lang
 	});
 
 exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{languageCode}/{contentCollectionId}/{lessonId}/cards/{cardId}')
-	.onWrite(event => {
+	.onUpdate(event => {
 	    const contentCollectionId = event.params.contentCollectionId;
 
 	    // Only proceed if the content collection is `lessons` or `classroom_resources`
@@ -74,3 +74,53 @@ exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{l
             });
 		});
 	});
+
+function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
+    const lessonRef = firestoreRef.collection(`localized/${languageCode}/syllabus_lessons`).doc(lessonId);
+
+    const topicsForLessonQuery = firestoreRef.collection(`localized/${languageCode}/topics`)
+        .where(`syllabus_lessons.${lessonId}`, "==", true);
+
+    return topicsForLessonQuery.get().then(function(querySnapshot) {
+        let count = querySnapshot.size;
+        return lessonRef.update({topicCount: count})
+    });
+}
+
+exports.countTopicsForSyllabusLesson = functions.firestore.document('localized/{languageCode}/syllabus_lessons/{lessonId}')
+    .onUpdate(event => {
+        const lessonId = event.params.lessonId;
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
+
+        return updateSyllabusLessonCount(lessonId, firestoreRef, languageCode);
+    });
+
+exports.countTopicsForSyllabusLessonOnTopicChange = functions.firestore.document('localized/{languageCode}/topics/{topicId}')
+    .onWrite(event => {
+        let oldSyllabusLessons = {};
+        let newSyllabusLessons = {};
+
+        if (event.data.previous && event.data.previous.data()["syllabus_lessons"]) {
+            oldSyllabusLessons = event.data.previous.data()["syllabus_lessons"];
+        }
+
+        if (event.data.exists && event.data.data()["syllabus_lessons"]) {
+            newSyllabusLessons = event.data.data()["syllabus_lessons"];
+        }
+
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
+
+        const writePromises = [];
+
+        for (oldLessonId in oldSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(oldLessonId, firestoreRef, languageCode))
+        }
+
+        for (newLessonId in newSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(newLessonId, firestoreRef, languageCode))
+        }
+
+        return Promise.all(writePromises);
+    });
