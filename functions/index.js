@@ -124,3 +124,29 @@ exports.countTopicsForSyllabusLessonOnTopicChange = functions.firestore.document
 
         return Promise.all(writePromises);
     });
+
+exports.createUserInFirestore = functions.auth.user().onCreate(event => {
+    const user = event.data;
+    const displayName = user.displayName;
+    const email = user.email;
+    const phoneNumber = user.phoneNumber;
+
+    const userObject = {};
+
+    if (displayName) {
+        userObject["displayName"] = displayName;
+    }
+
+    if (email) {
+        userObject["email"] = email;
+    }
+
+    if (phoneNumber) {
+        userObject["phoneNumber"] = phoneNumber;
+    }
+
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+
+    return usersCollection.add(userObject)
+});
