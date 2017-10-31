@@ -148,5 +148,14 @@ exports.createUserInFirestore = functions.auth.user().onCreate(event => {
     const firestore = admin.firestore();
     const usersCollection = firestore.collection("users");
 
-    return usersCollection.add(userObject)
+    return usersCollection.doc(user.uid).set(userObject)
+});
+
+exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
+    const user = event.data;
+
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+
+    return usersCollection.doc(user.uid).delete();
 });
