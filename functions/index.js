@@ -58,8 +58,8 @@ exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{l
 	        return null;
         }
 
-		const bucket = functions.config().firebase.storageBucket;
-		const file = gcs.bucket(bucket).file(attachmentPath);
+		const bucketName = functions.config().firebase.storageBucket;
+		const file = gcs.bucket(bucketName).file(attachmentPath);
 
 		return file.getMetadata().then(function(data) {
 
@@ -74,6 +74,39 @@ exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{l
             });
 		});
 	});
+
+// TODO: add this for LESSONS, CLASSROOM RESOURCES, not just drafts
+exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('users/{userId}/drafts/{parentContentId}/cards/{cardId}')
+    .onDelete(event => {
+        const userId = event.params.userId;
+        const cardId = event.params.cardId;
+        const parentContentId = event.params.parentContentId;
+
+        return deleteAttachmentFilesForCard(userId, parentContentId, cardId);
+    });
+
+function deleteAttachmentFilesForCard(userId, parentContentId, cardId) {
+    const bucketName = functions.config().firebase.storageBucket;
+    const bucket = gcs.bucket(bucketName);
+
+    const attachmentsDirectory = `user_uploads/${userId}/${parentContentId}/${cardId}/`;
+
+    return bucket.deleteFiles({ prefix: attachmentsDirectory });
+}
+
+exports.deleteCardsWithDraft = functions.firestore.document('users/{userId}/drafts/{draftId}')
+    .onDelete(event => {
+        const draftRef = event.data.ref;
+        const cardsRef = draftRef.collection('cards');
+
+        return cardsRef.get().then(querySnapshot => {
+            const deletePromises = [];
+            querySnapshot.forEach(documentSnapshot => {
+                deletePromises.push(documentSnapshot.ref.delete());
+            });
+            return Promise.all(deletePromises);
+        });
+    });
 
 function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     const lessonRef = firestoreRef.collection(`localized/${languageCode}/syllabus_lessons`).doc(lessonId);
@@ -158,4 +191,6 @@ exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
     const usersCollection = firestore.collection("users");
 
     return usersCollection.doc(user.uid).delete();
+
+    // TODO: Delete all drafts and their cards!
 });
