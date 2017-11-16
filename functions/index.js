@@ -3,9 +3,15 @@ const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
-exports.countSubtopicSubmissions = functions.firestore.document('localized/{languageCode}/lessons/{lessonId}')
+exports.countSubtopicLessonSubmissions = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
 	.onWrite(event => {
         let subtopic = null;
+
+        // Ensure the resource is/was a lesson:
+        if ((event.data.exists && event.data.data()["resourceType"] !== "lesson")
+            || (event.data.previous && event.data.previous.data()["subtopic"]) !== "lesson") {
+            return null;
+        }
 
         // Begin by setting subtopic to be the old subtopic, if possible:
 	    if (event.data.previous && event.data.previous.data()["subtopic"]) {
@@ -23,7 +29,8 @@ exports.countSubtopicSubmissions = functions.firestore.document('localized/{lang
         }
 
 	    const lessonCollectionRef = event.data.ref.parent;
-        const lessonsForSubtopicQuery = lessonCollectionRef.where("subtopic", "==", subtopic);
+        const lessonsForSubtopicQuery = lessonCollectionRef.where("subtopic", "==", subtopic)
+                                                            .where("status", "==", "published");
 
         return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
             const count = querySnapshot.size;
@@ -43,14 +50,32 @@ exports.countSubtopicSubmissions = functions.firestore.document('localized/{lang
         });
 	});
 
-exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{languageCode}/{contentCollectionId}/{lessonId}/cards/{cardId}')
-	.onUpdate(event => {
-	    const contentCollectionId = event.params.contentCollectionId;
-
-	    // Only proceed if the content collection is `lessons` or `classroom_resources`
-	    if (contentCollectionId !== "lessons" && contentCollectionId !== "classroom_resources") {
-	        return null;
+/**
+ * A function for creating a convenience field so we can simulate performing a query
+ *  with logical OR -- we want to know if this lesson is either awaiting review or has
+ *  changes requested.
+ */
+exports.checkIfIsAwaitingReviewOrHasChangesRequested = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onWrite(event => {
+        if (!event.data.exists) {
+            return null;
         }
+
+        const status = event.data.data().status;
+        if (!status) {
+            return null;
+        }
+
+        const isAwaitingReview = status === "awaiting review";
+        const hasChangesRequested = status === "changes requested";
+
+        const isAwaitingReviewOrHasChangesRequested = isAwaitingReview || hasChangesRequested;
+
+        return event.data.ref.update("isAwaitingReviewOrHasChangesRequested", isAwaitingReviewOrHasChangesRequested);
+    });
+
+exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
+	.onUpdate(event => {
 
 	    const attachmentPath = event.data.data().attachmentPath;
 
@@ -75,7 +100,7 @@ exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{l
 		});
 	});
 
-// TODO: add this for LESSONS, CLASSROOM RESOURCES, not just drafts
+// TODO: remove!
 exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('users/{userId}/drafts/{parentContentId}/cards/{cardId}')
     .onDelete(event => {
         const userId = event.params.userId;
@@ -83,6 +108,65 @@ exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('us
         const parentContentId = event.params.parentContentId;
 
         return deleteAttachmentFilesForCard(userId, parentContentId, cardId);
+    });
+
+/**
+ * This function deletes card attachments from storage when an individual
+ *  card is deleted and the parent resource *still exists*.
+ *
+ *  However, when the parent resource of a card is deleted, the cards will
+ *  be deleted (by {@link deleteCardsAndAttachmentsWithResource}). In this case, we
+ *  can't access the "authorId" field (since the parent resource is missing).
+ *
+ *  Thus, attachment deletion is also handled when an entire lesson is deleted
+ *   in {@link deleteCardsAndAttachmentsWithResource}.
+ */
+exports.deleteCardAttachmentsFromStorage = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
+    .onDelete(event => {
+
+        const resourceId = event.params.resourceId;
+        const cardId = event.params.cardId;
+
+        const resourceRef = event.data.ref.parent.parent;
+        return resourceRef.get().then(function(documentSnapshot) {
+
+            if (documentSnapshot.exists && documentSnapshot.data.exists) {
+                const authorId = documentSnapshot.data["authorId"];
+                return deleteAttachmentFilesForCard(authorId, resourceId, cardId);
+            } else {
+                // Parent content was deleted.
+                return null;
+            }
+        });
+
+    });
+
+/**
+ * {@see deleteCardAttachmentsFromStorage}
+ */
+exports.deleteCardsAndAttachmentsWithResource = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onDelete(event => {
+        const resourceRef = event.data.ref;
+        const cardsRef = resourceRef.collection('cards');
+
+        const authorId = event.data.previous.data().authorId;
+        const resourceId = event.params.resourceId;
+
+        return cardsRef.get().then(querySnapshot => {
+            const deletePromises = [];
+            querySnapshot.forEach(documentSnapshot => {
+                const cardId = documentSnapshot.id;
+
+                // Delete card attachments:
+                const deleteCardAttachmentsPromise =  deleteAttachmentFilesForCard(authorId, resourceId, cardId);
+                deletePromises.push(deleteCardAttachmentsPromise);
+
+                // Delete the card itself:
+                const deleteCardPromise = documentSnapshot.ref.delete();
+                deletePromises.push(deleteCardPromise);
+            });
+            return Promise.all(deletePromises);
+        });
     });
 
 function deleteAttachmentFilesForCard(userId, parentContentId, cardId) {
@@ -94,6 +178,7 @@ function deleteAttachmentFilesForCard(userId, parentContentId, cardId) {
     return bucket.deleteFiles({ prefix: attachmentsDirectory });
 }
 
+// TODO: remove!
 exports.deleteCardsWithDraft = functions.firestore.document('users/{userId}/drafts/{draftId}')
     .onDelete(event => {
         const draftRef = event.data.ref;
@@ -191,6 +276,4 @@ exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
     const usersCollection = firestore.collection("users");
 
     return usersCollection.doc(user.uid).delete();
-
-    // TODO: Delete all drafts and their cards!
 });
