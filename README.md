@@ -1,2 +1,2 @@
-# HappyTeacherCloudFunctions
-Firebase cloud functions for the Happy Teacher app.
+# Happy Teacher Cloud Functions
+Firebase Cloud Functions for the Happy Teacher app.
