@@ -3,6 +3,30 @@ const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
+exports.setResourceTimeUpdated = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onWrite(event => {
+        if (!event.data.exists) {
+            return null;
+        }
+
+        const now = new Date();
+        const previousDateUpdated = event.data.data().dateUpdated;
+
+        if (previousDateUpdated) {
+            // Calculate difference between the dates
+            const timeDiffMillis = now - previousDateUpdated;
+            const timeDiffMinutes = timeDiffMillis / 60000;
+
+            // If the updated time is within 5 minutes, don't update
+            //  (this is to prevent this function from triggering infinitely)
+            if (Math.abs(timeDiffMinutes) < 5) {
+                return null;
+            }
+        }
+
+        return event.data.ref.update({dateUpdated: now});
+    });
+
 /**
  * When a lesson is written with `isFeatured` set to true,
  *  ensure that no other lesson has `isFeatured` set to true.
