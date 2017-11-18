@@ -3,13 +3,64 @@ const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
+/**
+ * When a lesson is written with `isFeatured` set to true,
+ *  ensure that no other lesson has `isFeatured` set to true.
+ */
+exports.ensureExactlyOneLessonIsFeatured = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onWrite(event => {
+        if (!event.data.exists) {
+            return null;
+        }
+
+        const resourceRef = event.data.ref;
+        const type = event.data.data().resourceType;
+        const isFeatured = event.data.data().isFeatured;
+
+        if (type !== "lesson") {
+            return null;
+        }
+
+        const subtopic = event.data.data()["subtopic"];
+
+        const resourceCollectionRef = event.data.ref.parent;
+        const featuredLessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
+            .where("resourceType", "==", "lesson")
+            .where("status", "==", "published")
+            .where("isFeatured", "==", true);
+
+        return featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
+            const writePromises = [];
+
+            if (isFeatured) {
+                // Unfeature any other featured lessons
+                querySnapshot.forEach(function (doc) {
+
+                    // Ensure we're not writing to the ref that triggered this function
+                    if (doc.ref.path !== resourceRef.path) {
+                        let unfeaturePromise = doc.ref.update({isFeatured: false});
+                        writePromises.push(unfeaturePromise);
+                    }
+
+                });
+            } else if (querySnapshot.empty) {
+                // There are no featured lessons, so set this lesson as featured.
+                const featurePromise = resourceRef.update({isFeatured: true});
+                writePromises.push(featurePromise);
+            }
+
+            return Promise.all(writePromises);
+        });
+
+    });
+
 exports.countSubtopicLessonSubmissions = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
 	.onWrite(event => {
         let subtopic = null;
 
         // Ensure the resource is/was a lesson:
         if ((event.data.exists && event.data.data()["resourceType"] !== "lesson")
-            || (event.data.previous && event.data.previous.data()["subtopic"]) !== "lesson") {
+            || (event.data.previous && event.data.previous.data()["resourceType"]) !== "lesson") {
             return null;
         }
 
@@ -23,14 +74,16 @@ exports.countSubtopicLessonSubmissions = functions.firestore.document('localized
             subtopic = event.data.data()["subtopic"];
         }
 
-        // If neither the old nor new data has a subtopic, return null.
+        // If neither the old nor new data has a subtopic, cancel the operation.
         if (!subtopic) {
 	        return null;
         }
 
-	    const lessonCollectionRef = event.data.ref.parent;
-        const lessonsForSubtopicQuery = lessonCollectionRef.where("subtopic", "==", subtopic)
+	    const resourceCollectionRef = event.data.ref.parent;
+        const lessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
+                                                            .where("resourceType", "==", "lesson")
                                                             .where("status", "==", "published");
+
 
         return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
             const count = querySnapshot.size;
@@ -39,6 +92,7 @@ exports.countSubtopicLessonSubmissions = functions.firestore.document('localized
 
             const writePromises = [];
             featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
+
                 querySnapshot.forEach(function(doc) {
                     let writePromise = doc.ref.update({subtopicSubmissionCount : count});
                     writePromises.push(writePromise);
