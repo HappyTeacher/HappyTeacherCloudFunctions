@@ -355,3 +355,77 @@ exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
 
     return usersCollection.doc(user.uid).delete();
 });
+
+exports.onResourceStatusChange = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onUpdate(event => {
+        const resourceRef = event.data.ref;
+
+        const oldStatus = event.data.previous.data()["status"];
+        const newStatus = event.data.data()["status"];
+
+        if (!oldStatus || !newStatus || oldStatus === newStatus) {
+            return null;
+        }
+
+        const promises = [];
+
+        // Lock all feedback for each card
+        promises.push(lockAllCardFeedbackForResource(resourceRef));
+
+        if (newStatus === "awaiting review" || newStatus === "published") {
+            // When submitting a lesson for review or publishing, clear feedback previews
+            promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
+        }
+
+        return Promise.all(promises);
+    });
+
+function lockAllCardFeedbackForResource(resourceRef) {
+    return resourceRef.collection("cards").get().then(querySnapshot => {
+        const lockPromises = [];
+
+        querySnapshot.forEach(documentSnapshot => {
+            lockPromises.push(lockAllCardFeedback(documentSnapshot.ref));
+        });
+
+        return Promise.all(lockPromises);
+    });
+
+}
+
+function lockAllCardFeedback(cardRef) {
+    const feedbackCollectionRef = cardRef.collection("feedback");
+    return feedbackCollectionRef.get().then(querySnapshot => {
+        const lockPromises = [];
+        querySnapshot.forEach(documentSnapshot => {
+            lockPromises.push(setFeedbackToLocked(documentSnapshot.ref));
+        });
+
+        return Promise.all(lockPromises);
+    });
+}
+
+function setFeedbackToLocked(feedbackRef) {
+    console.log(`locking feedback ref: ${feedbackRef.path}`);
+    return feedbackRef.update("locked", true);
+}
+
+function clearFeedbackPreviewsForAllCardsInResource(resourceRef) {
+    return resourceRef.collection("cards").get().then(querySnapshot => {
+        const clearPreviewPromises = [];
+
+        querySnapshot.forEach(documentSnapshot => {
+            clearPreviewPromises.push(clearFeedbackPreviewForCard(documentSnapshot.ref));
+        });
+
+        return Promise.all(clearPreviewPromises);
+    });
+}
+
+function clearFeedbackPreviewForCard(cardRef) {
+    const promises = [];
+    promises.push(cardRef.update("feedbackPreviewComment", ""));
+    promises.push(cardRef.update("feedbackPreviewCommentPath", ""));
+
+    return Promise.all(promises);
+}
