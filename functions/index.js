@@ -406,7 +406,6 @@ function lockAllCardFeedback(cardRef) {
 }
 
 function setFeedbackToLocked(feedbackRef) {
-    console.log(`locking feedback ref: ${feedbackRef.path}`);
     return feedbackRef.update("locked", true);
 }
 
@@ -428,4 +427,41 @@ function clearFeedbackPreviewForCard(cardRef) {
     promises.push(cardRef.update("feedbackPreviewCommentPath", ""));
 
     return Promise.all(promises);
+}
+
+exports.updateCardFeedbackPreview = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}/feedback/{feedbackId}')
+    .onWrite(event => {
+        // Find latest reviewer feedback comment that is not locked and set it as card's preview
+        const feedbackCollectionRef = event.data.ref.parent;
+        const cardRef = event.data.ref.parent.parent;
+
+        return feedbackCollectionRef.where("reviewerComment", "==", true)
+            .where("locked", "==", false)
+            .orderBy("dateUpdated", "desc")
+            .get().then(querySnapshot => {
+                const size = querySnapshot.size;
+
+                if (size > 0) {
+                    const commentRef = querySnapshot.docs[0].ref;
+                    const comment = querySnapshot.docs[0].data();
+                    return setCardFeedbackPreview(cardRef, comment["commentText"], commentRef)
+                } else {
+                    return removeCardFeedbackPreview(cardRef)
+                }
+        });
+    });
+
+function setCardFeedbackPreview(cardRef, commentText, commentRef) {
+    const refPath = commentRef.path;
+    return cardRef.update({
+        feedbackPreviewComment: commentText,
+        feedbackPreviewCommentPath: refPath
+    });
+}
+
+function removeCardFeedbackPreview(cardRef) {
+    return cardRef.update({
+        feedbackPreviewComment: "",
+        feedbackPreviewCommentPath: ""
+    });
 }
