@@ -3,83 +3,109 @@ const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
 admin.initializeApp(functions.config().firebase);
 
-exports.setResourceTimeUpdated = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onWrite(event => {
-        if (!event.data.exists) {
-            return null;
-        }
+exports.createUserInFirestore = functions.auth.user().onCreate(event => {
+    const user = event.data;
+    const displayName = user.displayName;
+    const email = user.email;
+    const phoneNumber = user.phoneNumber;
 
-        const now = new Date();
-        const previousDateUpdated = event.data.data().dateUpdated;
+    const userObject = {};
 
-        if (previousDateUpdated) {
-            // Calculate difference between the dates
-            const timeDiffMillis = now - previousDateUpdated;
-            const timeDiffMinutes = timeDiffMillis / 60000;
+    if (displayName) {
+        userObject["displayName"] = displayName;
+    }
 
-            // If the updated time is within 5 minutes, don't update
-            //  (this is to prevent this function from triggering infinitely)
-            if (Math.abs(timeDiffMinutes) < 5) {
-                return null;
-            }
-        }
+    if (email) {
+        userObject["email"] = email;
+    }
 
-        return event.data.ref.update({dateUpdated: now});
-    });
+    if (phoneNumber) {
+        userObject["phoneNumber"] = phoneNumber;
+    }
 
-/**
- * When a lesson is written with `isFeatured` set to true,
- *  ensure that no other lesson has `isFeatured` set to true.
- */
-exports.ensureExactlyOneLessonIsFeatured = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onWrite(event => {
-        if (!event.data.exists) {
-            return null;
-        }
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+
+    return usersCollection.doc(user.uid).set(userObject)
+});
+
+exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
+    const user = event.data;
+
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+
+    // TODO: Delete user's lessons and file attachments?
+
+    return usersCollection.doc(user.uid).delete();
+});
+
+exports.onResourceCreate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onCreate(event => {
+        const promises = [];
 
         const resourceRef = event.data.ref;
-        const type = event.data.data().resourceType;
-        const isFeatured = event.data.data().isFeatured;
 
-        if (type !== "lesson") {
-            return null;
+        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, collectionRef);
+        promises.push(ensureOneLessonFeatured);
+
+        const updateTimestamp = updateResourceTimeUpdated(resourceRef);
+        promises.push(updateTimestamp);
+
+        return Promise.all(promises);
+    });
+
+exports.onResourceUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+    .onUpdate(event => {
+        const promises = [];
+        const resourceRef = event.data.ref;
+        const collectionRef = event.data.ref.parent;
+
+        const oldStatus = event.data.previous.data()["status"];
+        const newStatus = event.data.data()["status"];
+
+        // Respond to resource status changes:
+        if (oldStatus && newStatus && oldStatus !== newStatus) {
+            promises.push(onResourceStatusChange(resourceRef, newStatus));
         }
 
-        const subtopic = event.data.data()["subtopic"];
+        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(event.data.data(), resourceRef, collectionRef);
+        promises.push(ensureOneLessonFeatured);
 
-        const resourceCollectionRef = event.data.ref.parent;
-        const featuredLessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
-            .where("resourceType", "==", "lesson")
-            .where("status", "==", "published")
-            .where("isFeatured", "==", true);
+        return Promise.all(promises);
+    });
 
-        return featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
-            const writePromises = [];
+exports.onCardCreate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
+    .onCreate(event => {
+        const resourceRef = event.data.ref.parent.parent;
 
-            if (isFeatured) {
-                // Unfeature any other featured lessons
-                querySnapshot.forEach(function (doc) {
+        return updateResourceTimeUpdated(resourceRef);
+});
 
-                    // Ensure we're not writing to the ref that triggered this function
-                    if (doc.ref.path !== resourceRef.path) {
-                        let unfeaturePromise = doc.ref.update({isFeatured: false});
-                        writePromises.push(unfeaturePromise);
-                    }
+exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
+    .onUpdate(event => {
+        const promises = [];
+        const resourceRef = event.data.ref.parent.parent;
+        const cardRef = event.data.ref;
 
-                });
-            } else if (querySnapshot.empty) {
-                // There are no featured lessons, so set this lesson as featured.
-                const featurePromise = resourceRef.update({isFeatured: true});
-                writePromises.push(featurePromise);
-            }
+        const attachmentPath = event.data.data().attachmentPath;
+        promises.push(addAttachmentMetadataToCard(cardRef, attachmentPath));
 
-            return Promise.all(writePromises);
-        });
+        promises.push(updateResourceTimeUpdated(resourceRef));
 
+        return Promise.all(promises);
+    });
+
+exports.onCardFeedbackUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}/feedback/{feedbackId}')
+    .onUpdate(event => {
+        const cardRef = event.data.ref.parent.parent;
+        const feedbackCollectionRef = event.data.ref.parent;
+
+        return updateCardFeedbackPreview(cardRef, feedbackCollectionRef);
     });
 
 exports.countSubtopicLessonSubmissions = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-	.onWrite(event => {
+    .onWrite(event => {
         let subtopic = null;
 
         // Ensure the resource is/was a lesson:
@@ -89,8 +115,8 @@ exports.countSubtopicLessonSubmissions = functions.firestore.document('localized
         }
 
         // Begin by setting subtopic to be the old subtopic, if possible:
-	    if (event.data.previous && event.data.previous.data()["subtopic"]) {
-	        subtopic = event.data.previous.data()["subtopic"]
+        if (event.data.previous && event.data.previous.data()["subtopic"]) {
+            subtopic = event.data.previous.data()["subtopic"]
         }
 
         // If there's a new subtopic (and the data hasn't been deleted), use that:
@@ -100,13 +126,13 @@ exports.countSubtopicLessonSubmissions = functions.firestore.document('localized
 
         // If neither the old nor new data has a subtopic, cancel the operation.
         if (!subtopic) {
-	        return null;
+            return null;
         }
 
-	    const resourceCollectionRef = event.data.ref.parent;
+        const resourceCollectionRef = event.data.ref.parent;
         const lessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
-                                                            .where("resourceType", "==", "lesson")
-                                                            .where("status", "==", "published");
+            .where("resourceType", "==", "lesson")
+            .where("status", "==", "published");
 
 
         return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
@@ -126,66 +152,6 @@ exports.countSubtopicLessonSubmissions = functions.firestore.document('localized
                 return Promise.all(writePromises);
             });
         });
-	});
-
-/**
- * A function for creating a convenience field so we can simulate performing a query
- *  with logical OR -- we want to know if this lesson is either awaiting review or has
- *  changes requested.
- */
-exports.checkIfIsAwaitingReviewOrHasChangesRequested = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onWrite(event => {
-        if (!event.data.exists) {
-            return null;
-        }
-
-        const status = event.data.data().status;
-        if (!status) {
-            return null;
-        }
-
-        const isAwaitingReview = status === "awaiting review";
-        const hasChangesRequested = status === "changes requested";
-
-        const isAwaitingReviewOrHasChangesRequested = isAwaitingReview || hasChangesRequested;
-
-        return event.data.ref.update("isAwaitingReviewOrHasChangesRequested", isAwaitingReviewOrHasChangesRequested);
-    });
-
-exports.addAttachmentMetadataToCard = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
-	.onUpdate(event => {
-
-	    const attachmentPath = event.data.data().attachmentPath;
-
-	    if (!attachmentPath) {
-	        return null;
-        }
-
-		const bucketName = functions.config().firebase.storageBucket;
-		const file = gcs.bucket(bucketName).file(attachmentPath);
-
-		return file.getMetadata().then(function(data) {
-
-			metadataObject = {
-				"contentType": data[0]["contentType"],
-				"size": Number(data[0]["size"]),
-				"timeCreated": Date.parse(data[0]["timeCreated"])
-			};
-
-            return event.data.ref.update({
-                attachmentMetadata: metadataObject
-            });
-		});
-	});
-
-// TODO: remove!
-exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('users/{userId}/drafts/{parentContentId}/cards/{cardId}')
-    .onDelete(event => {
-        const userId = event.params.userId;
-        const cardId = event.params.cardId;
-        const parentContentId = event.params.parentContentId;
-
-        return deleteAttachmentFilesForCard(userId, parentContentId, cardId);
     });
 
 /**
@@ -193,12 +159,11 @@ exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('us
  *  it deletes card attachments from storage.
  *
  *  When the parent resource of a card is deleted, the cards will be deleted
- *  (by {@link deleteCardsAndAttachmentsWithResource}) but the resource will
- *  not exist. In this case, we can't access the "authorId" field (since the
- *  parent resource is missing).
+ *  (by {@link onResourceDelete}) but the resource will not exist. In this case,
+ *  we can't access the "authorId" field (since the parent resource is missing).
  *
  *  Thus, attachment deletion is also handled when an entire lesson is deleted
- *   in {@link deleteCardsAndAttachmentsWithResource}.
+ *   in {@link onResourceDelete}.
  */
 exports.onCardDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
     .onDelete(event => {
@@ -226,9 +191,10 @@ exports.onCardDelete = functions.firestore.document('localized/{languageCode}/re
     });
 
 /**
- * {@see deleteCardAttachmentsFromStorage}
+ * Delete cards and their attachments when the parent resource is deleted.
+ * {@see onCardDelete}
  */
-exports.deleteCardsAndAttachmentsWithResource = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
+exports.onResourceDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
     .onDelete(event => {
         const resourceRef = event.data.ref;
         const cardsRef = resourceRef.collection('cards');
@@ -245,6 +211,135 @@ exports.deleteCardsAndAttachmentsWithResource = functions.firestore.document('lo
 
         return Promise.all(deletionPromises);
     });
+
+/**
+ * Count topics for syllabus lesson when a syllabus lesson changes.
+ */
+exports.onSyllabusLessonUpdate = functions.firestore.document('localized/{languageCode}/syllabus_lessons/{lessonId}')
+    .onUpdate(event => {
+        const lessonId = event.params.lessonId;
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
+
+        return updateSyllabusLessonCount(lessonId, firestoreRef, languageCode);
+    });
+
+/**
+ * Count topics for syllabus lesson when a topic changes.
+ */
+exports.onTopicWrite = functions.firestore.document('localized/{languageCode}/topics/{topicId}')
+    .onWrite(event => {
+        let oldSyllabusLessons = {};
+        let newSyllabusLessons = {};
+
+        if (event.data.previous && event.data.previous.data()["syllabus_lessons"]) {
+            oldSyllabusLessons = event.data.previous.data()["syllabus_lessons"];
+        }
+
+        if (event.data.exists && event.data.data()["syllabus_lessons"]) {
+            newSyllabusLessons = event.data.data()["syllabus_lessons"];
+        }
+
+        const languageCode = event.params.languageCode;
+        const firestoreRef = event.data.ref.firestore;
+
+        const writePromises = [];
+
+        for (oldLessonId in oldSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(oldLessonId, firestoreRef, languageCode))
+        }
+
+        for (newLessonId in newSyllabusLessons) {
+            writePromises.push(updateSyllabusLessonCount(newLessonId, firestoreRef, languageCode))
+        }
+
+        return Promise.all(writePromises);
+    });
+
+
+function updateResourceTimeUpdated(resourceRef) {
+    const now = new Date();
+
+    return resourceRef.get().then(documentSnapshot => {
+        if (documentSnapshot.exists) {
+            const resourceData = documentSnapshot.data();
+            const previousDateUpdated = resourceData.dateUpdated;
+
+            if (previousDateUpdated) {
+                // Calculate difference between the dates
+                const timeDiffMillis = now - previousDateUpdated;
+                const timeDiffMinutes = timeDiffMillis / 60000;
+
+                // If the updated time is within 5 minutes, don't update
+                //  (this is to prevent this function from triggering too much)
+                if (Math.abs(timeDiffMinutes) < 5) {
+                    return null;
+                }
+            }
+
+            return resourceRef.update({dateUpdated: now});
+        }
+    });
+}
+
+function ensureExactlyOneLessonIsFeatured(resource, resourceRef, collectionRef) {
+    if (resource.resourceType !== "lesson" || resource.status !== "published") {
+        return null;
+    }
+
+    const subtopic = resource.subtopic;
+    const isFeatured = resource.isFeatured;
+
+    const featuredLessonsForSubtopicQuery = collectionRef.where("subtopic", "==", subtopic)
+        .where("resourceType", "==", "lesson")
+        .where("status", "==", "published")
+        .where("isFeatured", "==", true);
+
+    return featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
+        const writePromises = [];
+
+        if (isFeatured) {
+            // Unfeature any other featured lessons
+            querySnapshot.forEach(function (doc) {
+
+                // Ensure we're not writing to the ref that triggered this function
+                if (doc.ref.path !== resourceRef.path) {
+                    let unfeaturePromise = doc.ref.update({isFeatured: false});
+                    writePromises.push(unfeaturePromise);
+                }
+
+            });
+        } else if (querySnapshot.empty) {
+            // There are no featured lessons, so set this lesson as featured.
+            const featurePromise = resourceRef.update({isFeatured: true});
+            writePromises.push(featurePromise);
+        }
+
+        return Promise.all(writePromises);
+    });
+}
+
+function addAttachmentMetadataToCard(cardRef, attachmentPath) {
+    if (!attachmentPath) {
+        return null;
+    }
+
+    const bucketName = functions.config().firebase.storageBucket;
+    const file = gcs.bucket(bucketName).file(attachmentPath);
+
+    return file.getMetadata().then(function(data) {
+
+        metadataObject = {
+            "contentType": data[0]["contentType"],
+            "size": Number(data[0]["size"]),
+            "timeCreated": Date.parse(data[0]["timeCreated"])
+        };
+
+        return cardRef.update({
+            attachmentMetadata: metadataObject
+        });
+    });
+}
 
 function deleteAttachmentFilesForCard(userId, parentResourceId, cardId) {
     const bucketName = functions.config().firebase.storageBucket;
@@ -288,104 +383,29 @@ function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     });
 }
 
-exports.countTopicsForSyllabusLesson = functions.firestore.document('localized/{languageCode}/syllabus_lessons/{lessonId}')
-    .onUpdate(event => {
-        const lessonId = event.params.lessonId;
-        const languageCode = event.params.languageCode;
-        const firestoreRef = event.data.ref.firestore;
+function onResourceStatusChange(resourceRef, newStatus) {
+    const promises = [];
 
-        return updateSyllabusLessonCount(lessonId, firestoreRef, languageCode);
-    });
+    // Lock all feedback for each card
+    promises.push(lockAllCardFeedbackForResource(resourceRef));
 
-exports.countTopicsForSyllabusLessonOnTopicChange = functions.firestore.document('localized/{languageCode}/topics/{topicId}')
-    .onWrite(event => {
-        let oldSyllabusLessons = {};
-        let newSyllabusLessons = {};
+    // Create a convenience field so we can simulate performing a query
+    // with logical OR -- we want to know if this lesson is either awaiting review or has
+    // changes requested:
+    const isAwaitingReview = newStatus === "awaiting review";
+    const hasChangesRequested = newStatus === "changes requested";
+    const isAwaitingReviewOrHasChangesRequested = isAwaitingReview || hasChangesRequested;
+    const setOrField = resourceRef.update("isAwaitingReviewOrHasChangesRequested", isAwaitingReviewOrHasChangesRequested);
 
-        if (event.data.previous && event.data.previous.data()["syllabus_lessons"]) {
-            oldSyllabusLessons = event.data.previous.data()["syllabus_lessons"];
-        }
+    promises.push(setOrField);
 
-        if (event.data.exists && event.data.data()["syllabus_lessons"]) {
-            newSyllabusLessons = event.data.data()["syllabus_lessons"];
-        }
-
-        const languageCode = event.params.languageCode;
-        const firestoreRef = event.data.ref.firestore;
-
-        const writePromises = [];
-
-        for (oldLessonId in oldSyllabusLessons) {
-            writePromises.push(updateSyllabusLessonCount(oldLessonId, firestoreRef, languageCode))
-        }
-
-        for (newLessonId in newSyllabusLessons) {
-            writePromises.push(updateSyllabusLessonCount(newLessonId, firestoreRef, languageCode))
-        }
-
-        return Promise.all(writePromises);
-    });
-
-exports.createUserInFirestore = functions.auth.user().onCreate(event => {
-    const user = event.data;
-    const displayName = user.displayName;
-    const email = user.email;
-    const phoneNumber = user.phoneNumber;
-
-    const userObject = {};
-
-    if (displayName) {
-        userObject["displayName"] = displayName;
+    if (newStatus === "awaiting review" || newStatus === "published") {
+        // When submitting a lesson for review or publishing, clear feedback previews
+        promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
     }
 
-    if (email) {
-        userObject["email"] = email;
-    }
-
-    if (phoneNumber) {
-        userObject["phoneNumber"] = phoneNumber;
-    }
-
-    const firestore = admin.firestore();
-    const usersCollection = firestore.collection("users");
-
-    return usersCollection.doc(user.uid).set(userObject)
-});
-
-exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
-    const user = event.data;
-
-    const firestore = admin.firestore();
-    const usersCollection = firestore.collection("users");
-
-    // TODO: Delete user's lessons and file attachments?
-
-    return usersCollection.doc(user.uid).delete();
-});
-
-exports.onResourceStatusChange = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onUpdate(event => {
-        const resourceRef = event.data.ref;
-
-        const oldStatus = event.data.previous.data()["status"];
-        const newStatus = event.data.data()["status"];
-
-        if (!oldStatus || !newStatus || oldStatus === newStatus) {
-            return null;
-        }
-
-        const promises = [];
-
-        // Lock all feedback for each card
-        promises.push(lockAllCardFeedbackForResource(resourceRef));
-
-        if (newStatus === "awaiting review" || newStatus === "published") {
-            // When submitting a lesson for review or publishing, clear feedback previews
-            promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
-        }
-
-        return Promise.all(promises);
-    });
+    return Promise.all(promises);
+}
 
 function lockAllCardFeedbackForResource(resourceRef) {
     return resourceRef.collection("cards").get().then(querySnapshot => {
@@ -436,31 +456,23 @@ function clearFeedbackPreviewForCard(cardRef) {
     return Promise.all(promises);
 }
 
-exports.updateCardFeedbackPreview = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}/feedback/{feedbackId}')
-    .onWrite(event => {
-        if (!event.data.exists) {
-            return null;
-        }
+function updateCardFeedbackPreview(cardRef, feedbackCollectionRef) {
+    // Find latest reviewer feedback comment that is not locked and set it as card's preview
+    return feedbackCollectionRef.where("reviewerComment", "==", true)
+        .where("locked", "==", false)
+        .orderBy("dateUpdated", "desc")
+        .get().then(querySnapshot => {
+            const size = querySnapshot.size;
 
-        // Find latest reviewer feedback comment that is not locked and set it as card's preview
-        const feedbackCollectionRef = event.data.ref.parent;
-        const cardRef = event.data.ref.parent.parent;
-
-        return feedbackCollectionRef.where("reviewerComment", "==", true)
-            .where("locked", "==", false)
-            .orderBy("dateUpdated", "desc")
-            .get().then(querySnapshot => {
-                const size = querySnapshot.size;
-
-                if (size > 0) {
-                    const commentRef = querySnapshot.docs[0].ref;
-                    const comment = querySnapshot.docs[0].data();
-                    return setCardFeedbackPreview(cardRef, comment["commentText"], commentRef)
-                } else {
-                    return removeCardFeedbackPreview(cardRef)
-                }
+            if (size > 0) {
+                const commentRef = querySnapshot.docs[0].ref;
+                const comment = querySnapshot.docs[0].data();
+                return setCardFeedbackPreview(cardRef, comment["commentText"], commentRef)
+            } else {
+                return removeCardFeedbackPreview(cardRef)
+            }
         });
-    });
+}
 
 function setCardFeedbackPreview(cardRef, commentText, commentRef) {
     const refPath = commentRef.path;
