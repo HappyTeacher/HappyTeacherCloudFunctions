@@ -189,34 +189,40 @@ exports.deleteDraftCardAttachmentsFromStorage = functions.firestore.document('us
     });
 
 /**
- * This function deletes card attachments from storage when an individual
- *  card is deleted and the parent resource *still exists*.
+ * This function deletes card feedback and, when the parent resource still exists,
+ *  it deletes card attachments from storage.
  *
- *  However, when the parent resource of a card is deleted, the cards will
- *  be deleted (by {@link deleteCardsAndAttachmentsWithResource}). In this case, we
- *  can't access the "authorId" field (since the parent resource is missing).
+ *  When the parent resource of a card is deleted, the cards will be deleted
+ *  (by {@link deleteCardsAndAttachmentsWithResource}) but the resource will
+ *  not exist. In this case, we can't access the "authorId" field (since the
+ *  parent resource is missing).
  *
  *  Thus, attachment deletion is also handled when an entire lesson is deleted
  *   in {@link deleteCardsAndAttachmentsWithResource}.
  */
-exports.deleteCardAttachmentsFromStorage = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
+exports.onCardDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
     .onDelete(event => {
+        const deletionPromises = [];
 
         const resourceId = event.params.resourceId;
         const cardId = event.params.cardId;
 
+        const feedbackCollectionRef = event.data.ref.collection("feedback");
+        const deleteFeedback = deleteAllDocuments(feedbackCollectionRef);
+
+        deletionPromises.push(deleteFeedback);
+
         const resourceRef = event.data.ref.parent.parent;
+
         return resourceRef.get().then(function(documentSnapshot) {
 
-            if (documentSnapshot.exists && documentSnapshot.data.exists) {
-                const authorId = documentSnapshot.data["authorId"];
-                return deleteAttachmentFilesForCard(authorId, resourceId, cardId);
-            } else {
-                // Parent content was deleted.
-                return null;
+            if (documentSnapshot.exists) {
+                const authorId = documentSnapshot.data()["authorId"];
+                deletionPromises.push(deleteAttachmentFilesForCard(authorId, resourceId, cardId));
             }
-        });
 
+            return Promise.all(deletionPromises)
+        });
     });
 
 /**
@@ -230,46 +236,45 @@ exports.deleteCardsAndAttachmentsWithResource = functions.firestore.document('lo
         const authorId = event.data.previous.data().authorId;
         const resourceId = event.params.resourceId;
 
-        return cardsRef.get().then(querySnapshot => {
-            const deletePromises = [];
-            querySnapshot.forEach(documentSnapshot => {
-                const cardId = documentSnapshot.id;
+        const deletionPromises = [];
 
-                // Delete card attachments:
-                const deleteCardAttachmentsPromise =  deleteAttachmentFilesForCard(authorId, resourceId, cardId);
-                deletePromises.push(deleteCardAttachmentsPromise);
+        const deleteAllAttachments = deleteAllAttachmentFilesForResource(authorId, resourceId);
+        deletionPromises.push(deleteAllAttachments);
 
-                // Delete the card itself:
-                const deleteCardPromise = documentSnapshot.ref.delete();
-                deletePromises.push(deleteCardPromise);
-            });
-            return Promise.all(deletePromises);
-        });
+        deletionPromises.push(deleteAllDocuments(cardsRef));
+
+        return Promise.all(deletionPromises);
     });
 
-function deleteAttachmentFilesForCard(userId, parentContentId, cardId) {
+function deleteAttachmentFilesForCard(userId, parentResourceId, cardId) {
     const bucketName = functions.config().firebase.storageBucket;
     const bucket = gcs.bucket(bucketName);
 
-    const attachmentsDirectory = `user_uploads/${userId}/${parentContentId}/${cardId}/`;
+    const attachmentsDirectory = `user_uploads/${userId}/${parentResourceId}/${cardId}/`;
 
     return bucket.deleteFiles({ prefix: attachmentsDirectory });
 }
 
-// TODO: remove!
-exports.deleteCardsWithDraft = functions.firestore.document('users/{userId}/drafts/{draftId}')
-    .onDelete(event => {
-        const draftRef = event.data.ref;
-        const cardsRef = draftRef.collection('cards');
+function deleteAllAttachmentFilesForResource(userId, resourceId) {
+    const bucketName = functions.config().firebase.storageBucket;
+    const bucket = gcs.bucket(bucketName);
 
-        return cardsRef.get().then(querySnapshot => {
-            const deletePromises = [];
-            querySnapshot.forEach(documentSnapshot => {
-                deletePromises.push(documentSnapshot.ref.delete());
-            });
-            return Promise.all(deletePromises);
+    const resourceAttachmentsDirectory = `user_uploads/${userId}/${resourceId}`;
+
+    return bucket.deleteFiles({ prefix: resourceAttachmentsDirectory });
+}
+
+function deleteAllDocuments(collectionRef) {
+    return collectionRef.get().then(querySnapshot => {
+        const deletionPromises = [];
+
+        querySnapshot.forEach(documentSnapshot => {
+            deletionPromises.push(documentSnapshot.ref.delete());
         });
+
+        return Promise.all(deletionPromises)
     });
+}
 
 function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     const lessonRef = firestoreRef.collection(`localized/${languageCode}/syllabus_lessons`).doc(lessonId);
@@ -353,6 +358,8 @@ exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
     const firestore = admin.firestore();
     const usersCollection = firestore.collection("users");
 
+    // TODO: Delete user's lessons and file attachments?
+
     return usersCollection.doc(user.uid).delete();
 });
 
@@ -431,6 +438,10 @@ function clearFeedbackPreviewForCard(cardRef) {
 
 exports.updateCardFeedbackPreview = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}/feedback/{feedbackId}')
     .onWrite(event => {
+        if (!event.data.exists) {
+            return null;
+        }
+
         // Find latest reviewer feedback comment that is not locked and set it as card's preview
         const feedbackCollectionRef = event.data.ref.parent;
         const cardRef = event.data.ref.parent.parent;
