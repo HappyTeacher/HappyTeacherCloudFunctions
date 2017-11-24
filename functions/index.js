@@ -268,11 +268,11 @@ function updateResourceTimeUpdated(resourceRef) {
             if (previousDateUpdated) {
                 // Calculate difference between the dates
                 const timeDiffMillis = now - previousDateUpdated;
-                const timeDiffMinutes = timeDiffMillis / 60000;
+                const timeDiffMinutes = timeDiffMillis / 60000.0;
 
-                // If the updated time is within 5 minutes, don't update
+                // If the updated time is within 1 minute, don't update
                 //  (this is to prevent this function from triggering too much)
-                if (Math.abs(timeDiffMinutes) < 5) {
+                if (Math.abs(timeDiffMinutes) < 1) {
                     return null;
                 }
             }
@@ -404,8 +404,67 @@ function onResourceStatusChange(resourceRef, newStatus) {
         promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
     }
 
+    promises.push(notifyAuthorOfStatusChange(resourceRef, newStatus));
+
     return Promise.all(promises);
 }
+
+function notifyAuthorOfStatusChange(resourceRef, newStatus) {
+    if (newStatus === "published" || newStatus === "changes requested") {
+        return resourceRef.get().then(documentSnapshot => {
+            if (documentSnapshot.exists) {
+                const data = documentSnapshot.data();
+                const resourceName = data.name;
+                const authorId = data.authorId;
+                const resourceType = data.resourceType;
+
+                const payload = {
+                    data: {
+                        status: newStatus,
+                        referencePath: resourceRef.path,
+                        resourceName: resourceName,
+                        resourceType: resourceType
+                    }
+                };
+
+                return sendMessageToUserId(authorId, payload);
+
+            } else {
+                return null;
+            }
+        });
+
+    } else {
+        return null;
+    }
+}
+
+/**
+ * Get the registration token associated with the given user ID
+ *  and send a Google Cloud Message with the given payload to
+ *  that token.
+ */
+function sendMessageToUserId(userId, payload) {
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+    const userDocument = usersCollection.doc(userId);
+
+    return userDocument.get().then(documentSnapshot => {
+        if (documentSnapshot.exists) {
+            const token = documentSnapshot.data().registrationToken;
+
+            if (token) {
+                return admin.messaging().sendToDevice(token, payload)
+            } else {
+                return null;
+            }
+
+        } else {
+            return null;
+        }
+    });
+}
+
 
 function lockAllCardFeedbackForResource(resourceRef) {
     return resourceRef.collection("cards").get().then(querySnapshot => {
