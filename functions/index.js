@@ -96,14 +96,6 @@ exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/re
         return Promise.all(promises);
     });
 
-exports.onCardFeedbackUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}/feedback/{feedbackId}')
-    .onUpdate(event => {
-        const cardRef = event.data.ref.parent.parent;
-        const feedbackCollectionRef = event.data.ref.parent;
-
-        return updateCardFeedbackPreview(cardRef, feedbackCollectionRef);
-    });
-
 exports.countSubtopicLessonSubmissions = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
     .onWrite(event => {
         let subtopic = null;
@@ -399,6 +391,7 @@ function onResourceStatusChange(resourceRef, newStatus) {
 
     promises.push(setOrField);
 
+    console.log(`New status: ${newStatus}`)
     if (newStatus === "awaiting review" || newStatus === "published") {
         // When submitting a lesson for review or publishing, clear feedback previews
         promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
@@ -513,24 +506,6 @@ function clearFeedbackPreviewForCard(cardRef) {
     promises.push(cardRef.update("feedbackPreviewCommentPath", ""));
 
     return Promise.all(promises);
-}
-
-function updateCardFeedbackPreview(cardRef, feedbackCollectionRef) {
-    // Find latest reviewer feedback comment that is not locked and set it as card's preview
-    return feedbackCollectionRef.where("reviewerComment", "==", true)
-        .where("locked", "==", false)
-        .orderBy("dateUpdated", "desc")
-        .get().then(querySnapshot => {
-            const size = querySnapshot.size;
-
-            if (size > 0) {
-                const commentRef = querySnapshot.docs[0].ref;
-                const comment = querySnapshot.docs[0].data();
-                return setCardFeedbackPreview(cardRef, comment["commentText"], commentRef)
-            } else {
-                return removeCardFeedbackPreview(cardRef)
-            }
-        });
 }
 
 function setCardFeedbackPreview(cardRef, commentText, commentRef) {
