@@ -45,12 +45,17 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
         const promises = [];
 
         const resourceRef = event.data.ref;
+        const resourceCollectionRef = event.data.ref.parent;
+        const resource = event.data.data();
 
-        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, collectionRef);
+        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, resourceCollectionRef);
         promises.push(ensureOneLessonFeatured);
 
         const updateTimestamp = updateResourceTimeUpdated(resourceRef);
         promises.push(updateTimestamp);
+
+        const countSubmissions = countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef);
+        promises.push(countSubmissions);
 
         return Promise.all(promises);
     });
@@ -59,17 +64,27 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
     .onUpdate(event => {
         const promises = [];
         const resourceRef = event.data.ref;
-        const collectionRef = event.data.ref.parent;
+        const resourceCollectionRef = event.data.ref.parent;
+        const resource = event.data.data();
+
+        const isFeatured = resource.isFeatured;
 
         const oldStatus = event.data.previous.data()["status"];
         const newStatus = event.data.data()["status"];
 
-        // Respond to resource status changes:
+        const oldSubtopic = event.data.previous.data()["subtopic"];
+        const newSubtopic = event.data.data()["subtopic"];
+
         if (oldStatus && newStatus && oldStatus !== newStatus) {
             promises.push(onResourceStatusChange(resourceRef, newStatus));
+            promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
+        } else if (oldSubtopic && newSubtopic && oldSubtopic !== newSubtopic) {
+            promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
+        } else if (isFeatured) {
+            promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         }
 
-        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(event.data.data(), resourceRef, collectionRef);
+        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, resourceCollectionRef);
         promises.push(ensureOneLessonFeatured);
 
         return Promise.all(promises);
@@ -96,55 +111,29 @@ exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/re
         return Promise.all(promises);
     });
 
-exports.countSubtopicLessonSubmissions = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onWrite(event => {
-        let subtopic = null;
+function countSubtopicLessonSubmissions(subtopic, resourceCollectionRef) {
+    const lessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
+        .where("resourceType", "==", "lesson")
+        .where("status", "==", "published");
 
-        // Ensure the resource is/was a lesson:
-        if ((event.data.exists && event.data.data()["resourceType"] !== "lesson")
-            || (event.data.previous && event.data.previous.data()["resourceType"]) !== "lesson") {
-            return null;
-        }
+    return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
+        const count = querySnapshot.size;
 
-        // Begin by setting subtopic to be the old subtopic, if possible:
-        if (event.data.previous && event.data.previous.data()["subtopic"]) {
-            subtopic = event.data.previous.data()["subtopic"]
-        }
+        const featuredLessonsForSubtopicQuery = lessonsForSubtopicQuery.where("isFeatured", "==", true);
 
-        // If there's a new subtopic (and the data hasn't been deleted), use that:
-        if (event.data.exists && event.data.data()["subtopic"]) {
-            subtopic = event.data.data()["subtopic"];
-        }
+        const writePromises = [];
+        featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
 
-        // If neither the old nor new data has a subtopic, cancel the operation.
-        if (!subtopic) {
-            return null;
-        }
-
-        const resourceCollectionRef = event.data.ref.parent;
-        const lessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
-            .where("resourceType", "==", "lesson")
-            .where("status", "==", "published");
-
-
-        return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
-            const count = querySnapshot.size;
-
-            const featuredLessonsForSubtopicQuery = lessonsForSubtopicQuery.where("isFeatured", "==", true);
-
-            const writePromises = [];
-            featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
-
-                querySnapshot.forEach(function(doc) {
-                    let writePromise = doc.ref.update({subtopicSubmissionCount : count});
-                    writePromises.push(writePromise);
-                });
-
-                // Write count to all featured lessons (there should only be one)
-                return Promise.all(writePromises);
+            querySnapshot.forEach(function(doc) {
+                let writePromise = doc.ref.update({subtopicSubmissionCount : count});
+                writePromises.push(writePromise);
             });
+
+            // Write count to all featured lessons (there should only be one)
+            return Promise.all(writePromises);
         });
     });
+}
 
 /**
  * This function deletes card feedback and, when the parent resource still exists,
@@ -188,13 +177,17 @@ exports.onCardDelete = functions.firestore.document('localized/{languageCode}/re
  */
 exports.onResourceDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
     .onDelete(event => {
+        const resourceCollectionRef = event.data.ref.parent;
         const resourceRef = event.data.ref;
         const cardsRef = resourceRef.collection('cards');
 
         const authorId = event.data.previous.data().authorId;
         const resourceId = event.params.resourceId;
+        const subtopic = event.data.previous.data()["subtopic"];
 
         const deletionPromises = [];
+
+        promises.push(countSubtopicLessonSubmissions(subtopic, resourceCollectionRef));
 
         const deleteAllAttachments = deleteAllAttachmentFilesForResource(authorId, resourceId);
         deletionPromises.push(deleteAllAttachments);
@@ -391,7 +384,6 @@ function onResourceStatusChange(resourceRef, newStatus) {
 
     promises.push(setOrField);
 
-    console.log(`New status: ${newStatus}`)
     if (newStatus === "awaiting review" || newStatus === "published") {
         // When submitting a lesson for review or publishing, clear feedback previews
         promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
