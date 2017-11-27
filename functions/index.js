@@ -48,6 +48,12 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
         const resourceCollectionRef = event.data.ref.parent;
         const resource = event.data.data();
 
+        if (resource.resourceType === "lesson" && resource.isFeatured && resource.status === "published") {
+            promises.push(unfeatureOtherLessons(resource, resourceRef, resourceCollectionRef));
+        } else if (resource.resourceType === "lesson") {
+            promises.push(ensureSubtopicHasFeaturedLesson(resource.subtopic, resourceCollectionRef));
+        }
+
         const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, resourceCollectionRef);
         promises.push(ensureOneLessonFeatured);
 
@@ -76,7 +82,7 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
         const newSubtopic = event.data.data()["subtopic"];
 
         if (oldStatus && newStatus && oldStatus !== newStatus) {
-            promises.push(onResourceStatusChange(resourceRef, newStatus));
+            promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus));
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         } else if (oldSubtopic && newSubtopic && oldSubtopic !== newSubtopic) {
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
@@ -84,8 +90,11 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         }
 
-        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, resourceCollectionRef);
-        promises.push(ensureOneLessonFeatured);
+        if (resource.resourceType === "lesson" && resource.isFeatured && newStatus === "published") {
+            promises.push(unfeatureOtherLessons(resource, resourceRef, resourceCollectionRef))
+        } else if (resource.resourceType === "lesson") {
+            promises.push(ensureSubtopicHasFeaturedLesson(resource.subtopic, resourceCollectionRef));
+        }
 
         return Promise.all(promises);
     });
@@ -187,7 +196,7 @@ exports.onResourceDelete = functions.firestore.document('localized/{languageCode
 
         const deletionPromises = [];
 
-        promises.push(countSubtopicLessonSubmissions(subtopic, resourceCollectionRef));
+        deletionPromises.push(countSubtopicLessonSubmissions(subtopic, resourceCollectionRef));
 
         const deleteAllAttachments = deleteAllAttachmentFilesForResource(authorId, resourceId);
         deletionPromises.push(deleteAllAttachments);
@@ -267,13 +276,28 @@ function updateResourceTimeUpdated(resourceRef) {
     });
 }
 
-function ensureExactlyOneLessonIsFeatured(resource, resourceRef, collectionRef) {
+function ensureSubtopicHasFeaturedLesson(subtopic, collectionRef) {
+    const featuredLessonsForSubtopicQuery = collectionRef.where("subtopic", "==", subtopic)
+        .where("resourceType", "==", "lesson")
+        .where("status", "==", "published")
+        .where("isFeatured", "==", true);
+
+    return featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
+        if (querySnapshot.empty) {
+            // There are no featured lessons so feature the first one
+            return featureFirstLessonForSubtopic(subtopic, collectionRef);
+        } else {
+            return null
+        }
+    });
+}
+
+function unfeatureOtherLessons(resource, resourceRef, collectionRef) {
     if (resource.resourceType !== "lesson" || resource.status !== "published") {
         return null;
     }
 
     const subtopic = resource.subtopic;
-    const isFeatured = resource.isFeatured;
 
     const featuredLessonsForSubtopicQuery = collectionRef.where("subtopic", "==", subtopic)
         .where("resourceType", "==", "lesson")
@@ -283,24 +307,32 @@ function ensureExactlyOneLessonIsFeatured(resource, resourceRef, collectionRef) 
     return featuredLessonsForSubtopicQuery.get().then(function(querySnapshot) {
         const writePromises = [];
 
-        if (isFeatured) {
-            // Unfeature any other featured lessons
-            querySnapshot.forEach(function (doc) {
+        // Unfeature any other featured lessons
+        querySnapshot.forEach(function (doc) {
 
-                // Ensure we're not writing to the ref that triggered this function
-                if (doc.ref.path !== resourceRef.path) {
-                    let unfeaturePromise = doc.ref.update({isFeatured: false});
-                    writePromises.push(unfeaturePromise);
-                }
+            if (doc.ref.path !== resourceRef.path) {
+                let unfeaturePromise = doc.ref.update({isFeatured: false});
+                writePromises.push(unfeaturePromise);
+            }
 
-            });
-        } else if (querySnapshot.empty) {
-            // There are no featured lessons, so set this lesson as featured.
-            const featurePromise = resourceRef.update({isFeatured: true});
-            writePromises.push(featurePromise);
-        }
+        });
 
         return Promise.all(writePromises);
+    });
+}
+
+function featureFirstLessonForSubtopic(subtopic, collectionRef) {
+    const subtopicLessonsQuery = collectionRef.where("subtopic", "==", subtopic)
+        .where("resourceType", "==", "lesson")
+        .where("status", "==", "published");
+
+    return subtopicLessonsQuery.get().then(function(querySnapshot) {
+        if (querySnapshot.empty) {
+            return null;
+        } else {
+            const firstLessonDoc = querySnapshot.docs[0];
+            return firstLessonDoc.ref.update({isFeatured: true})
+        }
     });
 }
 
@@ -368,7 +400,7 @@ function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     });
 }
 
-function onResourceStatusChange(resourceRef, newStatus) {
+function onResourceStatusChange(resourceRef, newStatus, oldStatus) {
     const promises = [];
 
     // Lock all feedback for each card
@@ -387,6 +419,11 @@ function onResourceStatusChange(resourceRef, newStatus) {
     if (newStatus === "awaiting review" || newStatus === "published") {
         // When submitting a lesson for review or publishing, clear feedback previews
         promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
+    }
+
+    if (oldStatus === "published") {
+        // Unpublished resources aren't featured!
+        promises.push(resourceRef.update({isFeatured: false}));
     }
 
     promises.push(notifyAuthorOfStatusChange(resourceRef, newStatus));
