@@ -54,9 +54,6 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
             promises.push(ensureSubtopicHasFeaturedLesson(resource.subtopic, resourceCollectionRef));
         }
 
-        const ensureOneLessonFeatured = ensureExactlyOneLessonIsFeatured(resource, resourceRef, resourceCollectionRef);
-        promises.push(ensureOneLessonFeatured);
-
         const updateTimestamp = updateResourceTimeUpdated(resourceRef);
         promises.push(updateTimestamp);
 
@@ -72,6 +69,7 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
         const resourceRef = event.data.ref;
         const resourceCollectionRef = event.data.ref.parent;
         const resource = event.data.data();
+        const languageCode = event.params.languageCode
 
         const isFeatured = resource.isFeatured;
 
@@ -82,7 +80,7 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
         const newSubtopic = event.data.data()["subtopic"];
 
         if (oldStatus && newStatus && oldStatus !== newStatus) {
-            promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus));
+            promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, resource.topic));
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         } else if (oldSubtopic && newSubtopic && oldSubtopic !== newSubtopic) {
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
@@ -400,7 +398,7 @@ function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     });
 }
 
-function onResourceStatusChange(resourceRef, newStatus, oldStatus) {
+function onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, topicId) {
     const promises = [];
 
     // Lock all feedback for each card
@@ -427,6 +425,7 @@ function onResourceStatusChange(resourceRef, newStatus, oldStatus) {
     }
 
     promises.push(notifyAuthorOfStatusChange(resourceRef, newStatus));
+    promises.push(updateTopicPendingSubmissionFlag(topicId, languageCode));
 
     return Promise.all(promises);
 }
@@ -537,17 +536,19 @@ function clearFeedbackPreviewForCard(cardRef) {
     return Promise.all(promises);
 }
 
-function setCardFeedbackPreview(cardRef, commentText, commentRef) {
-    const refPath = commentRef.path;
-    return cardRef.update({
-        feedbackPreviewComment: commentText,
-        feedbackPreviewCommentPath: refPath
-    });
-}
+// Mark whether a topic has pending submissions or not
+function updateTopicPendingSubmissionFlag(topicId, languageCode) {
+    const firestore = admin.firestore();
+    const topicRef = firestore.doc(`localized/${languageCode}/topics/${topicId}`);
 
-function removeCardFeedbackPreview(cardRef) {
-    return cardRef.update({
-        feedbackPreviewComment: "",
-        feedbackPreviewCommentPath: ""
+    const resourceCollection = firestore.collection(`localized/${languageCode}/resources`);
+    const submissionQuery = resourceCollection.where("topic", "==", topicId)
+                                .where("status", "==", "awaiting review");
+
+    return submissionQuery.get().then(function(querySnapshot) {
+        const topicHasSubmissions = !querySnapshot.empty;
+        return topicRef.update({
+            hasPendingSubmissions: topicHasSubmissions
+        });
     });
 }
