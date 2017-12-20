@@ -69,7 +69,7 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
         const resourceRef = event.data.ref;
         const resourceCollectionRef = event.data.ref.parent;
         const resource = event.data.data();
-        const languageCode = event.params.languageCode
+        const languageCode = event.params.languageCode;
 
         const isFeatured = resource.isFeatured;
 
@@ -80,7 +80,7 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
         const newSubtopic = event.data.data()["subtopic"];
 
         if (oldStatus && newStatus && oldStatus !== newStatus) {
-            promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, resource.topic));
+            promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, resource));
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         } else if (oldSubtopic && newSubtopic && oldSubtopic !== newSubtopic) {
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
@@ -117,6 +117,63 @@ exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/re
 
         return Promise.all(promises);
     });
+
+exports.onUserUpdate = functions.firestore.document('users/{userId}')
+    .onUpdate(event => {
+        const userRef = event.data.ref;
+        const user = event.data.data();
+        const previousRole = event.data.previous.data().role;
+        const role = user.role;
+        const preferredLanguages = user["languages"];
+
+        const promises = [];
+
+        if (previousRole !== role && (role === "admin" || role === "moderator")) {
+            promises.push(userRef.update({isAdminOrMod: true}))
+        } else if (previousRole !== role && role !== "admin" && role !== "moderator") {
+            promises.push(userRef.update({isAdminOrMod: false}))
+        }
+
+        if (preferredLanguages && (previousRole !== role)
+            && (role === "admin" || role === "moderator")) {
+            promises.push(subscribeReviewerToAllSubjectSubmissionNotifications(userRef, preferredLanguages));
+        }
+
+        return Promise.all(promises);
+    });
+
+function subscribeReviewerToAllSubjectSubmissionNotifications(userRef, preferredLanguages) {
+    const promises = [];
+    console.log(JSON.stringify(preferredLanguages));
+    const languageCodes = Object.keys(preferredLanguages);
+
+    languageCodes.forEach(function(languageCode) {
+        promises.push(subscribeReviewerToAllSubjectSubmissionNotificationsForLanguage(languageCode, userRef))
+    });
+
+    return Promise.all(promises);
+}
+
+function subscribeReviewerToAllSubjectSubmissionNotificationsForLanguage(languageCode, userRef) {
+    const promises = [];
+
+    const firestore = admin.firestore();
+    const subjectCollection = firestore.collection(`localized/${languageCode}/subjects`);
+    const nonParentSubjectsQuery = subjectCollection.where("hasChildren", "==", false);
+
+    return nonParentSubjectsQuery.get().then(function(querySnapshot) {
+        querySnapshot.forEach(documentSnapshot => {
+            const subjectName = documentSnapshot.data().name;
+            promises.push(subscribeReviewerToSubmissionNotificationsForSubject(subjectName, userRef));
+        });
+
+        return Promise.all(promises);
+    });
+}
+
+function subscribeReviewerToSubmissionNotificationsForSubject(subjectName, userRef) {
+    return userRef.update(`watchingSubjects.${subjectName}`, true);
+}
 
 function countSubtopicLessonSubmissions(subtopic, resourceCollectionRef) {
     const lessonsForSubtopicQuery = resourceCollectionRef.where("subtopic", "==", subtopic)
@@ -398,8 +455,10 @@ function updateSyllabusLessonCount(lessonId, firestoreRef, languageCode) {
     });
 }
 
-function onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, topicId) {
+function onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, resource) {
     const promises = [];
+    const topicId = resource.topic;
+    const subjectName = resource.subjectName;
 
     // Lock all feedback for each card
     promises.push(lockAllCardFeedbackForResource(resourceRef));
@@ -419,6 +478,11 @@ function onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode,
         promises.push(clearFeedbackPreviewsForAllCardsInResource(resourceRef));
     }
 
+    if (newStatus === "awaiting review") {
+        // Alert reviewers who are watching this subject
+        promises.push(notifyReviewersOfSubmission(languageCode, topicId))
+    }
+
     if (oldStatus === "published") {
         // Unpublished resources aren't featured!
         promises.push(resourceRef.update({isFeatured: false}));
@@ -428,6 +492,64 @@ function onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode,
     promises.push(updateTopicPendingSubmissionFlag(topicId, languageCode));
 
     return Promise.all(promises);
+}
+
+function notifyReviewersOfSubmission(languageCode, topicId) {
+    const firestore = admin.firestore();
+    const topicsCollection = firestore.collection(`localized/${languageCode}/topics`);
+    const subjectsCollection = firestore.collection(`localized/${languageCode}/subjects`);
+
+    // Obtain subject through the topic..
+    topicsCollection.doc(topicId).get().then(documentSnapshot => {
+        if (documentSnapshot.exists) {
+            const topic = documentSnapshot.data();
+            const subjectId = topic.subject;
+
+            return subjectsCollection.doc(subjectId).get().then(documentSnapshot => {
+                if (documentSnapshot.exists) {
+                    const subject = documentSnapshot.data();
+                    return notifyReviewersOfSubmissionForSubject(subject, subjectId)
+                } else {
+                    return null;
+                }
+            });
+        } else {
+            return null;
+        }
+    });
+}
+
+function notifyReviewersOfSubmissionForSubject(subject, subjectId) {
+    const firestore = admin.firestore();
+    const usersCollection = firestore.collection("users");
+
+    const subjectName = subject.name;
+    const parentSubjectId = subject.parentSubject;
+
+    const payload = {
+        data: {
+            subjectName: subject.name,
+            subjectId: subjectId,
+            parentSubjectId: parentSubjectId,
+            notificationType: "newSubmissionForModerator"
+        }
+    };
+
+    const reviewersWatchingSubjectQuery = usersCollection.where("isAdminOrMod", "==", true)
+        .where(`watchingSubjects.${subjectName}`, "==", true);
+
+    return reviewersWatchingSubjectQuery.get().then(function(querySnapshot) {
+        const notificationTokens = [];
+
+        querySnapshot.forEach(documentSnapshot => {
+            const token = documentSnapshot.data()["registrationToken"];
+            if (token) {
+                notificationTokens.push(token)
+            }
+
+            return admin.messaging().sendToDevice(notificationTokens, payload);
+        });
+    });
 }
 
 function notifyAuthorOfStatusChange(resourceRef, newStatus) {
@@ -444,7 +566,8 @@ function notifyAuthorOfStatusChange(resourceRef, newStatus) {
                         status: newStatus,
                         referencePath: resourceRef.path,
                         resourceName: resourceName,
-                        resourceType: resourceType
+                        resourceType: resourceType,
+                        notificationType: "statusChangeForAuthor"
                     }
                 };
 
