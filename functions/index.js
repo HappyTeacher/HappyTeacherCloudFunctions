@@ -315,8 +315,19 @@ exports.onTopicWrite = functions.firestore.document('localized/{languageCode}/to
         return Promise.all(writePromises);
     });
 
-exports.onSubtopicWrite = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
-    .onWrite(event => {
+exports.onSubtopicCreate = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
+    .onCreate(event => {
+        const languageCode = event.params.languageCode;
+        const subtopicId = event.params.subtopicId;
+        const writePromises = [];
+
+        writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode));
+
+        return Promise.all(writePromises);
+    });
+
+exports.onSubtopicUpdate = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
+    .onUpdate(event => {
         const languageCode = event.params.languageCode;
         const subtopicId = event.params.subtopicId;
         const writePromises = [];
