@@ -44,6 +44,8 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
     .onCreate(event => {
         const promises = [];
 
+        const languageCode = event.params.languageCode;
+
         const resourceRef = event.data.ref;
         const resourceCollectionRef = event.data.ref.parent;
         const resource = event.data.data();
@@ -59,6 +61,10 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
 
         const countSubmissions = countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef);
         promises.push(countSubmissions);
+
+        if (resource.resourceType === "lesson") {
+            promises.push(associateSyllabusLessonsWithResource(resourceRef, resource.subtopic, languageCode))
+        }
 
         return Promise.all(promises);
     });
@@ -86,6 +92,10 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
         } else if (isFeatured) {
             promises.push(countSubtopicLessonSubmissions(resource.subtopic, resourceCollectionRef));
+        }
+
+        if (resource.resourceType === "lesson" && oldSubtopic && newSubtopic && oldSubtopic !== newSubtopic) {
+            promises.push(associateSyllabusLessonsWithResource(resourceRef, newSubtopic, languageCode))
         }
 
         if (resource.resourceType === "lesson" && resource.isFeatured && newStatus === "published") {
@@ -304,6 +314,52 @@ exports.onTopicWrite = functions.firestore.document('localized/{languageCode}/to
 
         return Promise.all(writePromises);
     });
+
+exports.onSubtopicWrite = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
+    .onWrite(event => {
+        const languageCode = event.params.languageCode;
+        const subtopicId = event.params.subtopicId;
+        const writePromises = [];
+
+        writePromises.push(writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode)));
+
+        return Promise.all(writePromises);
+    });
+
+function associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode) {
+    const firestore = admin.firestore();
+    const resourcesCollection = firestore.collection(`localized/${languageCode}/resources`);
+
+    const lessonsForSubtopicQuery = resourcesCollection.where("subtopic", "==", subtopicId)
+        .where("resourceType", "==", "lesson");
+
+    const promises = [];
+    return lessonsForSubtopicQuery.get().then(function(querySnapshot) {
+        querySnapshot.forEach(documentSnapshot => {
+            const lessonRef = documentSnapshot.ref;
+            promises.push(associateSyllabusLessonsWithResource(lessonRef, subtopicId, languageCode))
+        });
+
+        return Promise.all(promises)
+    });
+}
+
+function associateSyllabusLessonsWithResource(resourceRef, subtopicId, languageCode) {
+    const firestore = admin.firestore();
+    const subtopicsCollection = firestore.collection(`localized/${languageCode}/subtopics`);
+    const subtopicRef = subtopicsCollection.doc(subtopicId);
+
+    subtopicRef.get().then(documentSnapshot => {
+        if (documentSnapshot.exists) {
+            const subtopic = documentSnapshot.data();
+            const syllabusLessons = subtopic.syllabus_lessons;
+
+            return resourceRef.update("syllabus_lessons", syllabusLessons)
+        } else {
+            return null;
+        }
+    });
+}
 
 
 function updateResourceTimeUpdated(resourceRef) {
