@@ -321,7 +321,7 @@ exports.onSubtopicWrite = functions.firestore.document('localized/{languageCode}
         const subtopicId = event.params.subtopicId;
         const writePromises = [];
 
-        writePromises.push(writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode)));
+        writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode));
 
         return Promise.all(writePromises);
     });
