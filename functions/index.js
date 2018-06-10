@@ -1,13 +1,13 @@
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 const gcs = require('@google-cloud/storage')();
-admin.initializeApp(functions.config().firebase);
+admin.initializeApp();
+let firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
 
-exports.createUserInFirestore = functions.auth.user().onCreate(event => {
-    const user = event.data;
-    const displayName = user.displayName;
-    const email = user.email;
-    const phoneNumber = user.phoneNumber;
+exports.createUserInFirestore = functions.auth.user().onCreate((userRecord, context) => {
+    const displayName = userRecord.displayName;
+    const email = userRecord.email;
+    const phoneNumber = userRecord.phoneNumber;
 
     const userObject = {};
 
@@ -26,29 +26,27 @@ exports.createUserInFirestore = functions.auth.user().onCreate(event => {
     const firestore = admin.firestore();
     const usersCollection = firestore.collection("users");
 
-    return usersCollection.doc(user.uid).set(userObject)
+    return usersCollection.doc(userRecord.uid).set(userObject)
 });
 
-exports.deleteUserFromFirestore = functions.auth.user().onDelete(event => {
-    const user = event.data;
-
+exports.deleteUserFromFirestore = functions.auth.user().onDelete((userRecord, context) => {
     const firestore = admin.firestore();
     const usersCollection = firestore.collection("users");
 
     // TODO: Delete user's lessons and file attachments?
 
-    return usersCollection.doc(user.uid).delete();
+    return usersCollection.doc(userRecord.uid).delete();
 });
 
 exports.onResourceCreate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onCreate(event => {
+    .onCreate((dataSnapshot, context) => {
         const promises = [];
 
-        const languageCode = event.params.languageCode;
+        const languageCode = context.params.languageCode;
 
-        const resourceRef = event.data.ref;
-        const resourceCollectionRef = event.data.ref.parent;
-        const resource = event.data.data();
+        const resourceRef = dataSnapshot.ref;
+        const resourceCollectionRef = dataSnapshot.ref.parent;
+        const resource = dataSnapshot.data();
 
         if (resource.resourceType === "lesson" && resource.isFeatured && resource.status === "published") {
             promises.push(unfeatureOtherLessons(resource, resourceRef, resourceCollectionRef));
@@ -70,20 +68,20 @@ exports.onResourceCreate = functions.firestore.document('localized/{languageCode
     });
 
 exports.onResourceUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onUpdate(event => {
+    .onUpdate((change, context) => {
         const promises = [];
-        const resourceRef = event.data.ref;
-        const resourceCollectionRef = event.data.ref.parent;
-        const resource = event.data.data();
-        const languageCode = event.params.languageCode;
+        const resourceRef = change.after.ref;
+        const resourceCollectionRef = change.after.ref.parent;
+        const resource = change.after.data();
+        const languageCode = context.params.languageCode;
 
         const isFeatured = resource.isFeatured;
 
-        const oldStatus = event.data.previous.data()["status"];
-        const newStatus = event.data.data()["status"];
+        const oldStatus = change.before.data()["status"];
+        const newStatus = change.after.data()["status"];
 
-        const oldSubtopic = event.data.previous.data()["subtopic"];
-        const newSubtopic = event.data.data()["subtopic"];
+        const oldSubtopic = change.before.data()["subtopic"];
+        const newSubtopic = change.after.data()["subtopic"];
 
         if (oldStatus && newStatus && oldStatus !== newStatus) {
             promises.push(onResourceStatusChange(resourceRef, newStatus, oldStatus, languageCode, resource));
@@ -108,19 +106,19 @@ exports.onResourceUpdate = functions.firestore.document('localized/{languageCode
     });
 
 exports.onCardCreate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
-    .onCreate(event => {
-        const resourceRef = event.data.ref.parent.parent;
+    .onCreate((dataSnapshot, context) => {
+        const resourceRef = dataSnapshot.ref.parent.parent;
 
         return updateResourceTimeUpdated(resourceRef);
 });
 
 exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
-    .onUpdate(event => {
+    .onUpdate((change, context) => {
         const promises = [];
-        const resourceRef = event.data.ref.parent.parent;
-        const cardRef = event.data.ref;
+        const resourceRef = change.after.ref.parent.parent;
+        const cardRef = change.after.ref;
 
-        const attachmentPath = event.data.data().attachmentPath;
+        const attachmentPath = change.after.data().attachmentPath;
         promises.push(addAttachmentMetadataToCard(cardRef, attachmentPath));
 
         promises.push(updateResourceTimeUpdated(resourceRef));
@@ -129,10 +127,10 @@ exports.onCardUpdate = functions.firestore.document('localized/{languageCode}/re
     });
 
 exports.onUserUpdate = functions.firestore.document('users/{userId}')
-    .onUpdate(event => {
-        const userRef = event.data.ref;
-        const user = event.data.data();
-        const previousRole = event.data.previous.data().role;
+    .onUpdate((change, context) => {
+        const userRef = change.after.ref;
+        const user = change.after.data();
+        const previousRole = change.before.data().role;
         const role = user.role;
         const preferredLanguages = user["languages"];
 
@@ -221,18 +219,18 @@ function countSubtopicLessonSubmissions(subtopic, resourceCollectionRef) {
  *   in {@link onResourceDelete}.
  */
 exports.onCardDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}/cards/{cardId}')
-    .onDelete(event => {
+    .onDelete((deletedSnapshot, context) => {
         const deletionPromises = [];
 
-        const resourceId = event.params.resourceId;
-        const cardId = event.params.cardId;
+        const resourceId = context.params.resourceId;
+        const cardId = context.params.cardId;
 
-        const feedbackCollectionRef = event.data.ref.collection("feedback");
+        const feedbackCollectionRef = deletedSnapshot.ref.collection("feedback");
         const deleteFeedback = deleteAllDocuments(feedbackCollectionRef);
 
         deletionPromises.push(deleteFeedback);
 
-        const resourceRef = event.data.ref.parent.parent;
+        const resourceRef = deletedSnapshot.ref.parent.parent;
 
         return resourceRef.get().then(function(documentSnapshot) {
 
@@ -250,14 +248,14 @@ exports.onCardDelete = functions.firestore.document('localized/{languageCode}/re
  * {@see onCardDelete}
  */
 exports.onResourceDelete = functions.firestore.document('localized/{languageCode}/resources/{resourceId}')
-    .onDelete(event => {
-        const resourceCollectionRef = event.data.ref.parent;
-        const resourceRef = event.data.ref;
+    .onDelete((deletedSnapshot, context) => {
+        const resourceCollectionRef = deletedSnapshot.ref.parent;
+        const resourceRef = deletedSnapshot.ref;
         const cardsRef = resourceRef.collection('cards');
 
-        const authorId = event.data.previous.data().authorId;
-        const resourceId = event.params.resourceId;
-        const subtopic = event.data.previous.data()["subtopic"];
+        const authorId = deletedSnapshot.data().authorId;
+        const resourceId = context.params.resourceId;
+        const subtopic = deletedSnapshot.data()["subtopic"];
 
         const deletionPromises = [];
 
@@ -275,10 +273,10 @@ exports.onResourceDelete = functions.firestore.document('localized/{languageCode
  * Count topics for syllabus lesson when a syllabus lesson changes.
  */
 exports.onSyllabusLessonUpdate = functions.firestore.document('localized/{languageCode}/syllabus_lessons/{lessonId}')
-    .onUpdate(event => {
-        const lessonId = event.params.lessonId;
-        const languageCode = event.params.languageCode;
-        const firestoreRef = event.data.ref.firestore;
+    .onUpdate((change, context) => {
+        const lessonId = context.params.lessonId;
+        const languageCode = context.params.languageCode;
+        const firestoreRef = change.after.ref.firestore;
 
         return updateSyllabusLessonCount(lessonId, firestoreRef, languageCode);
     });
@@ -287,15 +285,15 @@ exports.onSyllabusLessonUpdate = functions.firestore.document('localized/{langua
  * Count topics for syllabus lesson when a topic changes.
  */
 exports.onTopicWrite = functions.firestore.document('localized/{languageCode}/topics/{topicId}')
-    .onWrite(event => {
+    .onWrite((change, context) => {
         let oldSyllabusLessons = {};
         let newSyllabusLessons = {};
 
-        if (event.data.previous && event.data.previous.data()["syllabus_lessons"]) {
+        if (change.before && change.before.data()["syllabus_lessons"]) {
             oldSyllabusLessons = event.data.previous.data()["syllabus_lessons"];
         }
 
-        if (event.data.exists && event.data.data()["syllabus_lessons"]) {
+        if (change.after.exists && change.after.data()["syllabus_lessons"]) {
             newSyllabusLessons = event.data.data()["syllabus_lessons"];
         }
 
@@ -316,9 +314,9 @@ exports.onTopicWrite = functions.firestore.document('localized/{languageCode}/to
     });
 
 exports.onSubtopicCreate = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
-    .onCreate(event => {
-        const languageCode = event.params.languageCode;
-        const subtopicId = event.params.subtopicId;
+    .onCreate((dataSnapshot, context) => {
+        const languageCode = context.params.languageCode;
+        const subtopicId = context.params.subtopicId;
         const writePromises = [];
 
         writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode));
@@ -327,9 +325,9 @@ exports.onSubtopicCreate = functions.firestore.document('localized/{languageCode
     });
 
 exports.onSubtopicUpdate = functions.firestore.document('localized/{languageCode}/subtopics/{subtopicId}')
-    .onUpdate(event => {
-        const languageCode = event.params.languageCode;
-        const subtopicId = event.params.subtopicId;
+    .onUpdate((change, context) => {
+        const languageCode = context.params.languageCode;
+        const subtopicId = context.params.subtopicId;
         const writePromises = [];
 
         writePromises.push(associateSyllabusLessonsWithResourcesForSubtopic(subtopicId, languageCode));
@@ -463,7 +461,7 @@ function addAttachmentMetadataToCard(cardRef, attachmentPath) {
         return null;
     }
 
-    const bucketName = functions.config().firebase.storageBucket;
+    const bucketName = firebaseConfig.storageBucket;
     const file = gcs.bucket(bucketName).file(attachmentPath);
 
     return file.getMetadata().then(function(data) {
@@ -481,7 +479,7 @@ function addAttachmentMetadataToCard(cardRef, attachmentPath) {
 }
 
 function deleteAttachmentFilesForCard(userId, parentResourceId, cardId) {
-    const bucketName = functions.config().firebase.storageBucket;
+    const bucketName = firebaseConfig.storageBucket;
     const bucket = gcs.bucket(bucketName);
 
     const attachmentsDirectory = `user_uploads/${userId}/${parentResourceId}/${cardId}/`;
@@ -490,7 +488,7 @@ function deleteAttachmentFilesForCard(userId, parentResourceId, cardId) {
 }
 
 function deleteAllAttachmentFilesForResource(userId, resourceId) {
-    const bucketName = functions.config().firebase.storageBucket;
+    const bucketName = firebaseConfig.storageBucket;
     const bucket = gcs.bucket(bucketName);
 
     const resourceAttachmentsDirectory = `user_uploads/${userId}/${resourceId}`;
@@ -666,6 +664,11 @@ function sendMessageToUserId(userId, payload) {
 
             if (token) {
                 return admin.messaging().sendToDevice(token, payload)
+                    .then(function(response) {
+                        console.log(`Successfully sent message to token ${token}, userID: ${userId}:`, response);
+                    }).catch(function(error) {
+                        console.log(`Error sending message:  to token ${token}, userID: ${userId}`, error);
+                    });
             } else {
                 return null;
             }
